@@ -1,0 +1,20 @@
+# Web Framework
+fastapi
+uvicorn[standard]
+dashscope
+chromadb
+sqlalchemy
+pillow
+pydantic-settings
+tqdm
+python-dotenv
+python-multipart
+requests
+python-jose[cryptography]
+passlib[bcrypt]
+pytest
+aiohttp
+chromadb
+dashscope
+tqdm
+pydantic-settings
