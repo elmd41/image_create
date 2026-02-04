@@ -30,6 +30,8 @@ _DATA_DIR = _PROJECT_ROOT / "data"
 
 class Settings(BaseSettings):
     """应用配置类，支持从环境变量加载配置"""
+    DASHSCOPE_API_KEY: str = "sk-3fab2e04b2104c05894ead0ca1e4cab1"
+    VOLC_API_KEY: str = "076f3484-2138-4fe1-bb65-5450d3309ab8"
 
     DEFAULT_VOLC_IMAGE_MODEL: ClassVar[str] = "doubao-seedream-4-5-251128"
 
@@ -45,10 +47,10 @@ class Settings(BaseSettings):
 
     # ==================== API Keys ====================
     # DashScope (阿里云通义千问)
-    API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
+    API_KEY: str = "sk-3fab2e04b2104c05894ead0ca1e4cab1"
     
     # 火山引擎 (Volcengine)
-    VOLC_API_KEY: str = os.getenv("VOLC_API_KEY", "")
+    VOLC_API_KEY: str = "076f3484-2138-4fe1-bb65-5450d3309ab8"
 
     # ==================== 模型配置 ====================
     # Embedding 模型

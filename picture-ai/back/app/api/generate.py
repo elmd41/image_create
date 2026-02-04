@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from app.config.settings import settings
 from app.service.volcengine_service import volcengine_service
-from app.service.vision_service import VisionService
+from app.service.vision_service import VisionService, vision_service
 
 
 logger = logging.getLogger(__name__)
@@ -43,31 +43,59 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(k.lower() in t for k in keywords)
 
 
+def _expand_simple_prompt(user_prompt: str | None) -> str:
+    """对简单的用户输入进行扩写，使其更自然流畅。
+    
+    在参数拼接前调用，确保扩写基于用户原始输入。
+    """
+    p = (user_prompt or "").strip()
+    if not p:
+        return p
+    
+    # 只有简短输入才扩写（≤12字符）
+    if len(p) > 12:
+        return p
+    
+    # 调用 VisionService 进行扩写
+    result = vision_service.optimize_text_prompt_with_confirm(p, None)
+    expanded = result.get("optimized_prompt", p)
+    return expanded if expanded else p
+
+
+def _ensure_carpet_subject(user_prompt: str | None) -> str:
+    p = (user_prompt or "").strip()
+    if not p:
+        return "地毯"
+
+    keywords = ("地毯", "地垫", "rug", "carpet")
+    if _contains_any(p, keywords):
+        return p
+
+    return f"地毯，{p}"
+
+
 def _wants_perspective_or_scene(user_prompt: str) -> bool:
+    """检测用户输入是否包含场景/图结构相关词汇。
+    
+    如果包含这些词汇，则不添加默认场景"平面设计图"。
+    """
     keywords = (
-        "透视",
-        "斜",
-        "侧面",
-        "侧视",
-        "角度",
-        "场景",
-        "室内",
-        "房间",
-        "客厅",
-        "卧室",
-        "地板",
-        "空间",
-        "摆拍",
-        "3d",
-        "渲染",
-        "render",
-        "perspective",
-        "angled",
-        "interior",
-        "room",
-        "scene",
-        "floor",
-        "lifestyle",
+        # 透视/角度
+        "透视", "斜", "侧面", "侧视", "角度", "俯视", "仰视",
+        # 场景类
+        "场景", "室内", "房间", "客厅", "卧室", "地板", "空间",
+        "摆拍", "摆放", "铺设", "铺在",
+        # 光影效果
+        "阳光", "光照", "投影", "窗光", "光影", "阴影",
+        # 背景/空间感
+        "家具", "虚化", "背景", "景深", "空间感", "环境",
+        # 纹理/特写
+        "纹理", "细节", "特写", "局部", "放大", "微距",
+        # 3D/效果图
+        "3d", "渲染", "效果图", "建模", "三维",
+        # 英文关键词
+        "render", "perspective", "angled", "interior", "room",
+        "scene", "floor", "lifestyle", "texture", "closeup",
     )
     return _contains_any(user_prompt, keywords)
 
@@ -156,8 +184,15 @@ def generate(
     logger.info("【主体颜色】: %s", color if color else "未指定")
     logger.info("【图结构】: %s", scene if scene else "默认(平面设计图)")
 
+    # 先对用户原始输入进行扩写（在参数拼接前）
+    expanded_prompt = _expand_simple_prompt(prompt)
+    if expanded_prompt != prompt:
+        logger.info("【扩写后】: %s", expanded_prompt)
+    
+    prompt_with_subject = _ensure_carpet_subject(expanded_prompt)
+
     # 构建增强提示词：将用户选择的参数加入到 prompt 中
-    base_prompt = _build_enhanced_prompt(prompt, style, ratio, color, scene)
+    base_prompt = _build_enhanced_prompt(prompt_with_subject, style, ratio, color, scene)
     enhanced_prompt = base_prompt
 
     try:
@@ -328,27 +363,114 @@ def _build_enhanced_prompt(
         return re.search(r"\d+\s*:\s*\d+", t) is not None
 
     def _format_color_for_prompt(raw: str) -> str:
+        """将颜色值转换为自然语言描述，避免十六进制代码被打印到图片上。"""
         c = (raw or "").strip()
         if not c:
-            return c
+            return ""
+        
+        # 如果是十六进制颜色，转换为近似的颜色名称
         if c.startswith("#"):
             c_hex = c[1:]
         else:
             c_hex = c
+        
         if re.fullmatch(r"[0-9a-fA-F]{6}", c_hex):
             r = int(c_hex[0:2], 16)
             g = int(c_hex[2:4], 16)
             b = int(c_hex[4:6], 16)
-            return f"RGB({r},{g},{b})"
-        return c
+            # 转换为近似颜色名称
+            color_name = _hex_to_color_name(r, g, b)
+            return f"主体颜色为{color_name}"
+        
+        # 如果已经是颜色名称，直接返回
+        return f"主体颜色为{c}"
+
+    def _hex_to_color_name(r: int, g: int, b: int) -> str:
+        """将 RGB 值转换为更精细的中文颜色名称，尽量接近用户选择的颜色。"""
+        # 预定义的颜色表（颜色名, R, G, B）
+        color_table = [
+            # 红色系
+            ("深红色", 139, 0, 0),
+            ("酒红色", 128, 0, 32),
+            ("正红色", 255, 0, 0),
+            ("朱红色", 255, 69, 0),
+            ("珊瑚红", 255, 127, 80),
+            ("粉红色", 255, 182, 193),
+            ("玫瑰红", 255, 0, 127),
+            # 橙色系
+            ("深橙色", 255, 140, 0),
+            ("橙色", 255, 165, 0),
+            ("暖橙色", 255, 155, 100),
+            ("杏色", 255, 200, 160),
+            ("桃色", 255, 218, 185),
+            # 黄色系
+            ("金黄色", 255, 215, 0),
+            ("明黄色", 255, 255, 0),
+            ("柠檬黄", 255, 247, 0),
+            ("淡黄色", 255, 255, 224),
+            ("米黄色", 245, 222, 179),
+            ("土黄色", 184, 134, 11),
+            # 绿色系
+            ("深绿色", 0, 100, 0),
+            ("森林绿", 34, 139, 34),
+            ("翠绿色", 0, 128, 0),
+            ("草绿色", 124, 252, 0),
+            ("浅绿色", 144, 238, 144),
+            ("薄荷绿", 152, 255, 152),
+            ("青绿色", 0, 128, 128),
+            ("橄榄绿", 128, 128, 0),
+            # 蓝色系
+            ("深蓝色", 0, 0, 139),
+            ("海军蓝", 0, 0, 128),
+            ("宝蓝色", 65, 105, 225),
+            ("天蓝色", 135, 206, 235),
+            ("湖蓝色", 30, 144, 255),
+            ("浅蓝色", 173, 216, 230),
+            ("青色", 0, 255, 255),
+            # 紫色系
+            ("深紫色", 75, 0, 130),
+            ("紫色", 128, 0, 128),
+            ("紫罗兰", 138, 43, 226),
+            ("淡紫色", 216, 191, 216),
+            ("薰衣草紫", 230, 230, 250),
+            ("品红色", 255, 0, 255),
+            # 棕色系
+            ("深棕色", 101, 67, 33),
+            ("棕色", 139, 69, 19),
+            ("咖啡色", 111, 78, 55),
+            ("巧克力色", 210, 105, 30),
+            ("驼色", 193, 154, 107),
+            ("米色", 245, 245, 220),
+            # 灰色系
+            ("黑色", 0, 0, 0),
+            ("深灰色", 64, 64, 64),
+            ("灰色", 128, 128, 128),
+            ("浅灰色", 192, 192, 192),
+            ("银色", 192, 192, 192),
+            ("白色", 255, 255, 255),
+            ("象牙白", 255, 255, 240),
+        ]
+        
+        # 找到最接近的颜色
+        min_dist = float("inf")
+        best_name = "彩色"
+        for name, cr, cg, cb in color_table:
+            dist = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
+            if dist < min_dist:
+                min_dist = dist
+                best_name = name
+        
+        return best_name
     
     # 添加风格描述（只使用参数本身，不扩写）
     if style:
         parts.append(str(style).strip())
 
-    # 添加颜色描述（只使用参数本身，不扩写）
+    # 添加颜色描述（转换为自然语言，避免十六进制被打印到图片上）
     if color:
-        parts.append(str(color).strip())
+        color_desc = _format_color_for_prompt(color)
+        if color_desc:
+            parts.append(color_desc)
 
     # 添加比例描述（只使用参数本身，不扩写）
     if ratio and ratio != "满铺":
@@ -358,21 +480,38 @@ def _build_enhanced_prompt(
     elif ratio == "满铺":
         parts.append("满铺")
 
-    # 添加构图/场景描述
-    scene_desc = _scene_to_prompt(scene)
-    if scene_desc:
-        if scene_desc not in (prompt or ""):
-            parts.append(scene_desc)
+    # 判断是否需要添加场景描述
+    # 如果用户输入已包含场景词，则不添加默认场景
+    use_default_scene = False
+    if not _wants_perspective_or_scene(prompt or ""):
+        scene_desc = _scene_to_prompt(scene)
+        if scene_desc and scene_desc not in (prompt or ""):
+            # 默认场景"平面设计图"需要前置
+            if scene_desc == DEFAULT_SCENE_VALUE:
+                use_default_scene = True
+            else:
+                parts.append(scene_desc)
     
     # 组合提示词
     if parts:
         param_desc = "，".join(parts)
         if prompt:
-            enhanced = f"{prompt}，{param_desc}"
+            base_content = f"{prompt}，{param_desc}"
         else:
-            enhanced = param_desc
+            base_content = param_desc
     else:
-        enhanced = prompt
+        base_content = prompt or ""
+    
+    # 默认场景"平面设计图"前置，提高权重
+    if use_default_scene:
+        # 将"地毯"替换为"地毯图"以增强语义
+        if base_content.startswith("地毯，"):
+            base_content = "地毯图，" + base_content[3:]
+        elif base_content.startswith("地毯"):
+            base_content = "地毯图" + base_content[2:]
+        enhanced = f"{DEFAULT_SCENE_VALUE}，{base_content}"
+    else:
+        enhanced = base_content
     
     return enhanced
 
@@ -587,17 +726,19 @@ def _process_image_to_image(
     """
     处理图生图的核心逻辑
 
-    1. 使用 DashScope qwen-vl-max 理解图片并优化提示词
-    2. 使用火山引擎图生图 API (传入参考图 + 优化后的提示词)
+    扩写已在 generate 入口处完成，这里直接使用传入的提示词。
     """
     ratio_only, ratio_val = _is_ratio_only_prompt(prompt)
     if ratio_only and ratio_val:
         optimized_prompt = _apply_ratio_fill_instruction(ratio_val, prompt)
     else:
         optimized_prompt = prompt
+    
     assistant_confirm = VisionService._fallback_confirm_edit(prompt)
 
-    # 步骤2: 使用火山引擎图生图 API (传入参考图 + 提示词)
+    logger.info("【图生图最终提示词】: %s", optimized_prompt)
+
+    # 使用火山引擎图生图 API
     results = volcengine_service.image_to_image(
         image_path,
         optimized_prompt,
@@ -615,14 +756,14 @@ def _text_to_image(
     """
     处理文生图
     
-    1. 使用 DashScope qwen-plus 优化提示词
-    2. 使用火山引擎生成图片
+    扩写已在 generate 入口处完成，这里直接使用传入的提示词。
     """
-    optimized_prompt = prompt
     assistant_confirm = VisionService._fallback_confirm_text(prompt)
     
-    # 步骤2: 使用火山引擎生成图片
-    results = volcengine_service.text_to_image(optimized_prompt, size=size)
+    logger.info("【文生图最终提示词】: %s", prompt)
+    
+    # 使用火山引擎生成图片
+    results = volcengine_service.text_to_image(prompt, size=size)
     return results, assistant_confirm
 
 
