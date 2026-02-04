@@ -1,97 +1,166 @@
-'''
-搜索 API 路由定义
-----------------
-功能：
-1. 定义 /api/search 接口，处理搜索请求
-2. 支持 文本->图 和 图->图 的多模态搜索
-3. 处理文件上传和临时文件管理
-4. 格式化搜索结果并返回给前端
+"""
+搜索 API 模块
+=============
 
-作业：
-- 优化临时文件的清理逻辑，确保无残留
-- 完善错误处理机制，提供更友好的错误提示
-'''
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
-import shutil
-import os
-import tempfile
-from app.service.search_service import vector_search_service
+提供图片搜索功能:
+- 文本搜索: 根据文字描述搜索相似图片
+- 图片搜索: 根据上传图片搜索相似图片
+"""
+
+from __future__ import annotations
 
 import logging
+import os
+import shutil
+import tempfile
+from typing import Any
 
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+
+from app.service.search_service import vector_search_service
+
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+# ==================== 响应模型 ====================
+
 class SearchResultItem(BaseModel):
+    """单个搜索结果"""
     id: str
     score: float
     path: str
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
+
 
 class SearchResponse(BaseModel):
-    results: List[SearchResultItem]
+    """搜索响应"""
+    results: list[SearchResultItem]
+
+
+# ==================== API 端点 ====================
 
 @router.post("/search", response_model=SearchResponse)
 def search(
-    text: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-    top_k: int = Form(10)
-):
+    text: str | None = Form(None, description="文本查询"),
+    file: UploadFile | None = File(None, description="图片文件"),
+    top_k: int = Form(10, description="返回结果数量"),
+    style: str | None = Form(None, description="风格流派"),
+    ratio: str | None = Form(None, description="图片比例"),
+    color: str | None = Form(None, description="主体颜色"),
+    scene: str | None = Form(None, description="图结构"),
+) -> SearchResponse:
     """
-    Search endpoint supporting both text-to-image and image-to-image search.
+    图片搜索接口
     
-    - **text**: Text query for text-to-image search.
-    - **file**: Image file upload for image-to-image search.
-    - **top_k**: Number of results to return (default: 10).
+    支持两种搜索模式:
+    - 文本搜索: 提供 text 参数
+    - 图片搜索: 上传 file 文件
     
-    You must provide either `text` or `file`.
+    必须提供 text 或 file 其中之一
     """
-    print(f"收到搜索请求: text={text}, file={file.filename if file else None}")
-    results = []
-    
+    query_text = _build_search_query(text=text, style=style, ratio=ratio, color=color, scene=scene)
+    logger.info("收到搜索请求: text=%s, file=%s", query_text, file.filename if file else None)
+
     if file:
-        # Handle image search (Image-to-Image)
-        # Create a temporary file to save the uploaded image
-        # We need a physical file path for the embedding service
-        suffix = os.path.splitext(file.filename)[1] if file.filename else ".tmp"
+        results = _search_by_image(file, query_text, top_k)
+    elif query_text:
+        results = _search_by_text(query_text, top_k)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="必须提供 text 或 file 参数",
+        )
+
+    return SearchResponse(results=results)
+
+
+# ==================== 内部函数 ====================
+
+def _search_by_image(file: UploadFile, query_text: str, top_k: int) -> list[SearchResultItem]:
+    """通过图片进行搜索"""
+    suffix = _get_file_extension(file.filename)
+    tmp_path = None
+    
+    try:
+        # 保存上传文件到临时目录
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             shutil.copyfileobj(file.file, tmp)
             tmp_path = tmp.name
-        
-        try:
-            # Perform search using the temporary file path
-            results = vector_search_service.search_by_image(tmp_path, top_k)
-        except Exception as e:
-            logging.exception("Image search failed")
-            raise HTTPException(status_code=500, detail=f"Image search failed: {str(e)}")
-        finally:
-            # Clean up the temporary file
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except:
-                    pass # Ignore cleanup errors
-                
-    elif text:
-        # Handle text search (Text-to-Image)
-        try:
-            results = vector_search_service.search_by_text(text, top_k)
-        except Exception as e:
-            logging.exception("Text search failed")
-            raise HTTPException(status_code=500, detail=f"Text search failed: {str(e)}")
-            
-    else:
-        raise HTTPException(status_code=400, detail="Either 'text' or 'file' must be provided")
 
-    # Format results for the response
-    formatted_results = [
+        # 执行搜索
+        if (query_text or "").strip():
+            results = vector_search_service.search_by_image_with_text(tmp_path, query_text, top_k)
+        else:
+            results = vector_search_service.search_by_image(tmp_path, top_k)
+        return _format_results(results)
+        
+    except Exception as e:
+        logger.exception("图片搜索失败")
+        raise HTTPException(status_code=500, detail=f"图片搜索失败: {e}") from e
+        
+    finally:
+        _cleanup_temp_file(tmp_path)
+
+
+def _search_by_text(text: str, top_k: int) -> list[SearchResultItem]:
+    """通过文本进行搜索"""
+    try:
+        results = vector_search_service.search_by_text(text, top_k)
+        return _format_results(results)
+    except Exception as e:
+        logger.exception("文本搜索失败")
+        raise HTTPException(status_code=500, detail=f"文本搜索失败: {e}") from e
+
+
+def _build_search_query(
+    text: str | None,
+    style: str | None,
+    ratio: str | None,
+    color: str | None,
+    scene: str | None,
+) -> str:
+    parts: list[str] = []
+    if (text or "").strip():
+        parts.append((text or "").strip())
+    if (style or "").strip():
+        parts.append(f"{(style or '').strip()}风格")
+    if (ratio or "").strip():
+        parts.append(f"比例为{(ratio or '').strip()}")
+    if (color or "").strip():
+        parts.append(f"主体颜色倾向于{(color or '').strip()}")
+    if (scene or "").strip():
+        parts.append(f"图结构为{(scene or '').strip()}")
+    return "，".join([p for p in parts if p])
+
+
+def _format_results(results: list[dict[str, Any]]) -> list[SearchResultItem]:
+    """格式化搜索结果"""
+    return [
         SearchResultItem(
-            id=str(res["id"]),
-            score=res["score"],
-            path=res["path"],
-            metadata=res["metadata"]
-        ) for res in results
+            id=str(item["id"]),
+            score=item["score"],
+            path=item["path"],
+            metadata=item.get("metadata"),
+        )
+        for item in results
     ]
 
-    return SearchResponse(results=formatted_results)
+
+def _get_file_extension(filename: str | None) -> str:
+    """获取文件扩展名"""
+    if filename:
+        _, ext = os.path.splitext(filename)
+        return ext or ".tmp"
+    return ".tmp"
+
+
+def _cleanup_temp_file(path: str | None) -> None:
+    """清理临时文件"""
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning("清理临时文件失败: %s", path)

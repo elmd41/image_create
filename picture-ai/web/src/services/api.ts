@@ -14,23 +14,25 @@
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
 
-export const search = async (formData: FormData) => {
+const parseError = async (response: Response) => {
+  const errorBody = await response.json().catch(() => {
+    return { detail: `HTTP error! status: ${response.status}` };
+  });
+  throw new Error(errorBody.detail || 'An unknown error occurred');
+};
+
+export const search = async (formData: FormData, signal?: AbortSignal) => {
   const response = await fetch(`${API_BASE_URL}/api/search`, {
     method: 'POST',
     body: formData,
+    signal,
     // When using FormData with fetch, the browser automatically sets the
     // 'Content-Type' header with the correct 'boundary' parameter.
     // Manually setting it will cause errors.
   });
 
   if (!response.ok) {
-    // If the response is not OK, try to parse the error message from the backend
-    const errorBody = await response.json().catch(() => {
-      // If the body is not JSON or empty, create a fallback error
-      return { detail: `HTTP error! status: ${response.status}` };
-    });
-    // Throw an error that can be caught by the UI
-    throw new Error(errorBody.detail || 'An unknown error occurred');
+    await parseError(response);
   }
 
   // The calling code in App.tsx expects a response object with a `data` property,
@@ -39,17 +41,19 @@ export const search = async (formData: FormData) => {
   return { data: responseData };
 };
 
-export const generate = async (formData: FormData) => {
+export const proxyImageUrl = (url: string) => {
+  return `${API_BASE_URL}/api/proxy-image?url=${encodeURIComponent(url)}`;
+};
+
+export const generate = async (formData: FormData, signal?: AbortSignal) => {
   const response = await fetch(`${API_BASE_URL}/api/generate`, {
     method: 'POST',
     body: formData,
+    signal,
   });
 
   if (!response.ok) {
-    const errorBody = await response.json().catch(() => {
-      return { detail: `HTTP error! status: ${response.status}` };
-    });
-    throw new Error(errorBody.detail || 'Generation failed');
+    await parseError(response);
   }
 
   const responseData = await response.json();

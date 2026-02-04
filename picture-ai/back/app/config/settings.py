@@ -1,68 +1,117 @@
-'''
-项目配置文件
------------
-功能：
-1. 管理项目的所有配置项（API Key、文件路径、数据库连接等）
-2. 自动创建项目所需的数据目录结构
-3. 提供统一的配置访问接口
+"""
+应用配置模块
+============
 
-作业：
-- 确保 API Key 安全存储（建议使用环境变量）
-- 检查文件路径在不同操作系统下的兼容性
-'''
+集中管理所有配置项，支持环境变量覆盖。
+
+使用方式:
+    from app.config.settings import settings
+    print(settings.API_KEY)
+
+环境变量:
+    可通过 .env 文件或系统环境变量覆盖默认配置
+"""
+
+from __future__ import annotations
+
 import os
+from functools import lru_cache
 from pathlib import Path
-from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import ClassVar
 
-# 项目根目录 back/
-BACK_DIR = Path(__file__).parent.parent.parent
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# 目录常量
+_BACK_DIR = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = _BACK_DIR.parent
+_DATA_DIR = _PROJECT_ROOT / "data"
+
 
 class Settings(BaseSettings):
-    # API Key 配置
-    # 请将你的千问 API Key 填入下方，或者在项目根目录创建 .env 文件并写入 API_KEY="sk-..."
-    API_KEY: str = "sk-3fab2e04b2104c05894ead0ca1e4cab1"
+    """应用配置类，支持从环境变量加载配置"""
 
-    # 路径配置
-    # 所有数据（数据库、向量库、日志、上传文件）都将存储在项目根目录下的 data 目录中
-    DATA_PATH: Path = BACK_DIR.parent / "data"
-    # 存放原始图片的目录
-    IMAGE_SOURCE_PATH: Path = DATA_PATH / "images"
-    # 日志文件路径
-    LOG_PATH: Path = DATA_PATH / "logs"
-    # SQLite 数据库文件路径
-    DATABASE_URL: str = f"sqlite:///{DATA_PATH / 'picture_ai.db'}"
-    # 向量数据库存储路径 (FAISS 索引文件将保存在此目录)
-    VECTOR_STORE_PATH: str = str(DATA_PATH / "vector_store")
+    DEFAULT_VOLC_IMAGE_MODEL: ClassVar[str] = "doubao-seedream-4-5-251128"
 
-    # Embedding 模型配置
+    # ==================== 目录配置 ====================
+    DATA_PATH: Path = _DATA_DIR
+    IMAGE_SOURCE_PATH: Path = _DATA_DIR / "images"
+    LOG_PATH: Path = _DATA_DIR / "logs"
+    VECTOR_STORE_PATH: Path = _DATA_DIR / "vector_store"
+    GENERATED_PATH: Path = _DATA_DIR / "generated"
+
+    # ==================== 数据库配置 ====================
+    DATABASE_URL: str = f"sqlite:///{_DATA_DIR / 'picture_ai.db'}"
+
+    # ==================== API Keys ====================
+    # DashScope (阿里云通义千问)
+    API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
+    
+    # 火山引擎 (Volcengine)
+    VOLC_API_KEY: str = os.getenv("VOLC_API_KEY", "")
+
+    # ==================== 模型配置 ====================
+    # Embedding 模型
     TEXT_EMBEDDING_MODEL: str = "multimodal-embedding-v1"
     IMAGE_EMBEDDING_MODEL: str = "multimodal-embedding-v1"
-    # 向量维度 (千问 multimodal-embedding-v1 图片向量实际返回 1024 维)
     TEXT_EMBEDDING_MODEL_DIM: int = 1024
 
-    # 其他配置
+    # 火山引擎图像生成模型
+    VOLC_IMAGE_MODEL: str = DEFAULT_VOLC_IMAGE_MODEL
+    VOLC_API_ENDPOINT: str = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+
+    VOLC_REQUEST_TIMEOUT_SECONDS: int = 180
+    VOLC_REQUEST_MAX_RETRIES: int = 2
+    VOLC_REQUEST_RETRY_BACKOFF_SECONDS: float = 1.0
+
+    VOLC_MIN_IMAGE_PIXELS: int = 3686400
+    VOLC_SIZE_ALIGN: int = 64
+
+    GENERATE_FLAT_QC_ENABLED: bool = True
+    GENERATE_FLAT_QC_MAX_RETRIES: int = 2
+
+    # ==================== 服务配置 ====================
+    BACKEND_PUBLIC_URL: str = "http://127.0.0.1:8000"
     DEBUG: bool = True
 
-    class Config:
-        # 允许从 .env 文件中加载环境变量
-        env_file = BACK_DIR / ".env"
-        env_file_encoding = "utf-8"
+    # ==================== Pydantic 配置 ====================
+    model_config = SettingsConfigDict(
+        env_file=_BACK_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",  # 忽略未知的环境变量
+    )
 
-# 实例化配置对象
-settings = Settings()
 
-# --- 自动创建项目所需目录 ---
-def create_directories():
-    """在应用启动时创建所有必需的数据目录"""
-    paths_to_create = [
+@lru_cache
+def get_settings() -> Settings:
+    """
+    获取配置单例（带缓存）
+    
+    使用 lru_cache 确保只创建一个 Settings 实例
+    """
+    return Settings()
+
+
+# 配置单例
+settings = get_settings()
+
+# 强制使用默认模型，避免环境变量覆盖导致版本不一致
+if settings.VOLC_IMAGE_MODEL != Settings.DEFAULT_VOLC_IMAGE_MODEL:
+    settings.VOLC_IMAGE_MODEL = Settings.DEFAULT_VOLC_IMAGE_MODEL
+
+
+def _ensure_directories() -> None:
+    """确保所有必需的数据目录存在"""
+    directories = [
         settings.DATA_PATH,
         settings.IMAGE_SOURCE_PATH,
         settings.LOG_PATH,
-        Path(settings.VECTOR_STORE_PATH)
+        settings.VECTOR_STORE_PATH,
+        settings.GENERATED_PATH,
     ]
-    for path in paths_to_create:
-        path.mkdir(parents=True, exist_ok=True)
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
 
-# 在模块加载时执行创建目录的操作
-create_directories()
+
+# 模块加载时创建目录
+_ensure_directories()

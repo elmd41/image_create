@@ -2,6 +2,9 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 python-dotenv
+python-multipart
 faiss-cpu
 tqdm
 dashscope
+requests
+pillow

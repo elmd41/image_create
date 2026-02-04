@@ -1,80 +1,695 @@
-'''
-图像生成 API 路由定义
---------------------
-功能：
-1. 提供 /api/generate 接口
-2. 处理文生图 (Text-to-Image) 请求
-3. 处理图生图 (Image-to-Image) 请求
-'''
+"""
+图像生成 API 模块
+=================
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import List, Optional
-from pydantic import BaseModel
-import shutil
-import os
-import tempfile
+提供图像生成功能:
+- 文生图 (Text-to-Image): 根据文字描述生成图片
+- 图生图 (Image-to-Image): 基于参考图片进行风格重绘
+
+架构说明:
+- DashScope (qwen-plus, qwen-vl-max): 用于提示词优化
+- 火山引擎 (doubao-seedream): 用于实际图像生成
+"""
+
+from __future__ import annotations
+
 import logging
-from app.service.wanx_service import wanx_service
+import os
+import re
+import shutil
+import tempfile
+import time
 
+import requests
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
+from PIL import Image
+from pydantic import BaseModel
+
+from app.config.settings import settings
+from app.service.volcengine_service import volcengine_service
+from app.service.vision_service import VisionService
+
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+DEFAULT_SCENE_VALUE = "平面设计图"
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in keywords)
+
+
+def _wants_perspective_or_scene(user_prompt: str) -> bool:
+    keywords = (
+        "透视",
+        "斜",
+        "侧面",
+        "侧视",
+        "角度",
+        "场景",
+        "室内",
+        "房间",
+        "客厅",
+        "卧室",
+        "地板",
+        "空间",
+        "摆拍",
+        "3d",
+        "渲染",
+        "render",
+        "perspective",
+        "angled",
+        "interior",
+        "room",
+        "scene",
+        "floor",
+        "lifestyle",
+    )
+    return _contains_any(user_prompt, keywords)
+
+
+def _is_default_scene(scene: str | None) -> bool:
+    return (scene or "").strip() in ("", DEFAULT_SCENE_VALUE)
+
+
+def _scene_to_prompt(scene: str | None) -> str | None:
+    if _is_default_scene(scene):
+        return DEFAULT_SCENE_VALUE
+
+    return (scene or "").strip() or None
+
+
+def _is_flat_mode(user_prompt: str, scene: str | None) -> bool:
+    return _is_default_scene(scene)
+
+
+# ==================== 响应模型 ====================
+
 class GenerateResponse(BaseModel):
-    results: List[str] # 返回图片 URL 列表
+    """生成响应"""
+    results: list[str]  # 图片 URL 列表
+    assistant_confirm: str | None = None  # 一句话复述/确认
+
+
+@router.get("/proxy-image")
+def proxy_image(url: str) -> Response:
+    """代理拉取图片字节，用于前端下载/格式转换，避免浏览器 CORS 限制。"""
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="url 参数必须是 http(s) 链接")
+
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"图片代理失败: {e}") from e
+
+    content_type = resp.headers.get("content-type") or "application/octet-stream"
+    return Response(content=resp.content, media_type=content_type)
+
+
+# ==================== API 端点 ====================
 
 @router.post("/generate", response_model=GenerateResponse)
 def generate(
-    prompt: str = Form(..., description="生成提示词"),
-    file: Optional[UploadFile] = File(None, description="参考图（用于图生图）"),
+    request: Request,
+    prompt: str = Form("", description="生成提示词"),
+    file: UploadFile | None = File(None, description="参考图片"),
+    reference_url: str | None = Form(None, description="参考图 URL"),
+    context: str | None = Form(None, description="对话上下文"),
     n: int = Form(1, description="生成数量"),
-    size: str = Form("1024*1024", description="图片尺寸")
-):
+    size: str = Form("1024*1024", description="图片尺寸"),
+    style: str | None = Form(None, description="风格流派"),
+    ratio: str | None = Form(None, description="图片比例"),
+    color: str | None = Form(None, description="主体颜色"),
+    scene: str | None = Form(None, description="图结构"),
+) -> GenerateResponse:
     """
     图像生成接口
     
-    - **prompt**: 必需。描述想要生成的图片内容。
-    - **file**: 可选。如果提供，将进行图生图（风格重绘）；否则进行文生图。
-    - **n**: 生成数量，默认为 1。
-    - **size**: 图片尺寸，默认为 1024*1024。
+    支持三种模式:
+    1. 文生图: 仅提供 prompt
+    2. 图生图: 提供 prompt + file (上传图片)
+    3. 多轮图生图: 提供 prompt + reference_url (基于上次生成结果)
+    
+    工作流程:
+    1. DashScope (qwen-plus/qwen-vl-max) 优化提示词
+    2. 火山引擎 (doubao-seedream) 生成图片
     """
-    print(f"收到生成请求: prompt='{prompt}', file={file.filename if file else None}")
+    ratio_clean = (ratio or "").replace(" ", "")
+    if ratio_clean and size == "1024*1024":
+        mapped = RATIO_SIZE_MAP.get(ratio_clean)
+        if mapped:
+            size = mapped
+
+    logger.info("=" * 70)
+    logger.info("【收到图像生成请求】")
+    logger.info("【用户输入】: %s", prompt)
+    logger.info("【上传文件】: %s", file.filename if file else "无")
+    logger.info("【参考URL】: %s", reference_url if reference_url else "无")
+    logger.info("【图片尺寸】: %s", size)
+    logger.info("【风格流派】: %s", style if style else "未指定")
+    logger.info("【图片比例】: %s", ratio if ratio else "未指定")
+    logger.info("【主体颜色】: %s", color if color else "未指定")
+    logger.info("【图结构】: %s", scene if scene else "默认(平面设计图)")
+
+    # 构建增强提示词：将用户选择的参数加入到 prompt 中
+    base_prompt = _build_enhanced_prompt(prompt, style, ratio, color, scene)
+    enhanced_prompt = base_prompt
+
+    try:
+        prompt_attempt = enhanced_prompt
+
+        ratio_in_prompt = re.search(r"\d+\s*:\s*\d+", (prompt or "")) is not None
+        preserve_reference_ratio = (not ratio) and (not ratio_in_prompt) and (size == "1024*1024")
+
+        if file:
+            logger.info("【增强提示词】: %s", prompt_attempt)
+            logger.info("【模式】: 图生图 (上传图片)")
+            results, assistant_confirm = _image_to_image_from_upload(
+                file,
+                prompt_attempt,
+                None,
+                size,
+                preserve_reference_ratio=preserve_reference_ratio,
+            )
+        elif reference_url:
+            logger.info("【增强提示词】: %s", prompt_attempt)
+            logger.info("【模式】: 图生图 (URL引用)")
+            results, assistant_confirm = _image_to_image_from_url(
+                reference_url,
+                prompt_attempt,
+                None,
+                size,
+                preserve_reference_ratio=preserve_reference_ratio,
+            )
+        else:
+            inferred = _infer_generate_action(base_prompt, context)
+            if inferred["action"] == "image_to_image" and inferred.get("reference_url"):
+                ratio_only_from_text, ratio_val = _is_ratio_only_prompt(base_prompt)
+                if ratio_only_from_text and ratio_val:
+                    prompt_attempt = _apply_ratio_fill_instruction(ratio_val, base_prompt)
+                logger.info("【增强提示词】: %s", prompt_attempt)
+                logger.info("【模式】: 图生图 (上下文推断) | reference_url=%s", inferred.get("reference_url"))
+                results, assistant_confirm = _image_to_image_from_url(
+                    inferred["reference_url"],
+                    prompt_attempt,
+                    None,
+                    size,
+                    preserve_reference_ratio=preserve_reference_ratio,
+                )
+            else:
+                prompt_attempt = base_prompt
+                logger.info("【增强提示词】: %s", prompt_attempt)
+                logger.info("【模式】: 文生图 (上下文推断)")
+                results, assistant_confirm = _text_to_image(
+                    prompt_attempt,
+                    None,
+                    size,
+                )
+
+        logger.info("【生成成功】: %s", results)
+        logger.info("=" * 70)
+        return GenerateResponse(results=results, assistant_confirm=assistant_confirm)
+
+    except Exception as e:
+        logger.exception("【图像生成失败】")
+        logger.info("=" * 70)
+        error_message = str(e)
+        status_code = _get_error_status_code(error_message)
+        detail = _get_error_detail(error_message)
+        raise HTTPException(status_code=status_code, detail=detail) from e
+
+
+# ==================== 内部函数 ====================
+
+# 比例映射到实际尺寸
+RATIO_SIZE_MAP = {
+    "1:1": "1024*1024",
+    "2:3": "768*1024",
+    "3:4": "768*1024",
+    "4:3": "1024*768",
+    "9:16": "576*1024",
+    "16:9": "1024*576",
+    "满铺": "1024*1024",  # 默认正方形满铺
+}
+
+
+_SUPPORTED_BASE_SIZES: list[str] = [
+    "1024*1024",
+    "768*1024",
+    "1024*768",
+    "576*1024",
+    "1024*576",
+]
+
+
+def _parse_size_to_wh(size: str) -> tuple[int, int] | None:
+    raw = (size or "").strip().lower().replace("x", "*")
+    if "*" not in raw:
+        return None
+    parts = raw.split("*")
+    if len(parts) != 2:
+        return None
+    if not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
+        return None
+    w = int(parts[0].strip())
+    h = int(parts[1].strip())
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
+def _pick_closest_supported_size_for_aspect(aspect: float) -> str:
+    # aspect = w/h
+    if aspect <= 0:
+        return "1024*1024"
+
+    best = "1024*1024"
+    best_delta = float("inf")
+    for s in _SUPPORTED_BASE_SIZES:
+        wh = _parse_size_to_wh(s)
+        if not wh:
+            continue
+        w, h = wh
+        cand = w / float(h)
+        delta = abs(cand - aspect)
+        if delta < best_delta:
+            best_delta = delta
+            best = s
+    return best
+
+
+def _infer_supported_size_from_image(path: str) -> str | None:
+    try:
+        with Image.open(path) as img:
+            w, h = img.size
+    except Exception:
+        return None
+
+    if not w or not h:
+        return None
+    return _pick_closest_supported_size_for_aspect(w / float(h))
+
+
+def _ratio_orientation_hint(ratio: str) -> str:
+    return ""
+
+
+def _build_enhanced_prompt(
+    prompt: str,
+    style: str | None,
+    ratio: str | None,
+    color: str | None,
+    scene: str | None,
+) -> str:
+    """
+    将用户选择的参数融入到原始提示词中
+    
+    Args:
+        prompt: 原始提示词
+        style: 风格流派
+        ratio: 图片比例
+        color: 主体颜色
+        
+    Returns:
+        增强后的提示词
+    """
+    parts = []
+
+    def _prompt_has_explicit_ratio(text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return False
+        # 只把明确的比例值当作“已经写过比例”，避免“图案比例不变”这种描述吞掉参数
+        return re.search(r"\d+\s*:\s*\d+", t) is not None
+
+    def _format_color_for_prompt(raw: str) -> str:
+        c = (raw or "").strip()
+        if not c:
+            return c
+        if c.startswith("#"):
+            c_hex = c[1:]
+        else:
+            c_hex = c
+        if re.fullmatch(r"[0-9a-fA-F]{6}", c_hex):
+            r = int(c_hex[0:2], 16)
+            g = int(c_hex[2:4], 16)
+            b = int(c_hex[4:6], 16)
+            return f"RGB({r},{g},{b})"
+        return c
+    
+    # 添加风格描述（只使用参数本身，不扩写）
+    if style:
+        parts.append(str(style).strip())
+
+    # 添加颜色描述（只使用参数本身，不扩写）
+    if color:
+        parts.append(str(color).strip())
+
+    # 添加比例描述（只使用参数本身，不扩写）
+    if ratio and ratio != "满铺":
+        prompt_text = (prompt or "")
+        if (ratio not in prompt_text) and (not _prompt_has_explicit_ratio(prompt_text)):
+            parts.append((ratio or "").strip())
+    elif ratio == "满铺":
+        parts.append("满铺")
+
+    # 添加构图/场景描述
+    scene_desc = _scene_to_prompt(scene)
+    if scene_desc:
+        if scene_desc not in (prompt or ""):
+            parts.append(scene_desc)
+    
+    # 组合提示词
+    if parts:
+        param_desc = "，".join(parts)
+        if prompt:
+            enhanced = f"{prompt}，{param_desc}"
+        else:
+            enhanced = param_desc
+    else:
+        enhanced = prompt
+    
+    return enhanced
+
+
+def _is_ratio_only_prompt(prompt: str) -> tuple[bool, str | None]:
+    text = (prompt or "").strip()
+    if not text:
+        return False, None
+    match = re.fullmatch(r"(比例[：:]?\s*)?(比例为\s*)?(?P<ratio>\d+\s*:\s*\d+)", text)
+    if not match:
+        return False, None
+    ratio = (match.group("ratio") or "").replace(" ", "")
+    return True, ratio
+
+
+def _apply_ratio_fill_instruction(ratio: str, user_prompt: str | None = None) -> str:
+    base = (user_prompt or "").strip()
+    prefix = base if base else f"比例为{ratio}"
+    return prefix
+
+
+def _extract_image_urls_from_context(context: str | None) -> list[str]:
+    if not context:
+        return []
+
+    urls = re.findall(r"https?://[^\s\]\)\"']+", context)
+    # 仅保留看起来像图片资源的 URL（包含 /generated 或常见后缀）
+    filtered: list[str] = []
+    for u in urls:
+        ul = u.lower()
+        if "/generated" in ul or any(ul.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")):
+            filtered.append(u)
+    return filtered
+
+
+def _infer_generate_action(prompt: str, context: str | None) -> dict[str, str | None]:
+    """根据用户语义在文生图/改图之间切换，并从上下文选择目标图片。"""
+    text = (prompt or "").strip()
+    image_urls = _extract_image_urls_from_context(context)
+
+    # 意图判断：生成 vs 修改
+    generate_keywords = ("生成", "画", "来一张", "给我一张", "做一张", "再生成", "重新生成", "新生成")
+    edit_keywords = (
+        "修改",
+        "改成",
+        "调整",
+        "微调",
+        "细调",
+        "变成",
+        "换成",
+        "去掉",
+        "增加",
+        "减少",
+        "优化",
+        "更像",
+        "保持",
+    )
+
+    # 引用上一张/历史图的典型表达
+    reference_keywords = (
+        "基于",
+        "参考",
+        "在上一张",
+        "用上一张",
+        "沿用上一张",
+        "上一个",
+        "上一张",
+        "最后一张",
+        "刚刚那张",
+        "最新",
+        "第一张",
+        "最上面",
+        "开头那张",
+        "第",
+    )
+
+    wants_generate = any(k in text for k in generate_keywords)
+    wants_edit = any(k in text for k in edit_keywords)
+    wants_reference = any(k in text for k in reference_keywords)
+
+    # 生成新图（明确“生成/来一张/给我一张”等）时，避免旧上下文污染
+    if wants_generate and not wants_edit:
+        return {"action": "text_to_image", "reference_url": None, "use_context": False}
+
+    # 明确修改，且有历史图时才走图生图
+    if wants_edit and image_urls:
+        return {"action": "image_to_image", "reference_url": image_urls[-1], "use_context": True}
+
+    # 生成语句里明确提到“参考/基于上一张”等，才尝试走图生图
+    if wants_generate and wants_reference and image_urls:
+        return {"action": "image_to_image", "reference_url": image_urls[-1], "use_context": True}
+
+    # 其他情况（即便有历史图，也不主动过度解读为“修改”）
+    return {"action": "text_to_image", "reference_url": None, "use_context": False}
+
+def _image_to_image_from_upload(
+    file: UploadFile,
+    prompt: str,
+    context: str | None,
+    size: str,
+    preserve_reference_ratio: bool = False,
+) -> tuple[list[str], str | None]:
+    """基于上传图片进行图生图"""
+    logger.info("【处理上传图片】: %s", file.filename)
+    
+    suffix = _get_file_extension(file.filename)
+    tmp_path = None
     
     try:
-        if file:
-            # --- 图生图流程 ---
-            # 1. 保存上传的临时文件
-            print(f"[Generate API] 接收到图生图请求，文件名: {file.filename}")
-            suffix = os.path.splitext(file.filename)[1] if file.filename else ".tmp"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                shutil.copyfileobj(file.file, tmp)
-                tmp_path = tmp.name
-            print(f"[Generate API] 图片已保存到临时路径: {tmp_path}")
-            
-            try:
-                # 2. 调用图生图服务
-                # 注意：图生图通常需要 prompt 来辅助描述
-                results = wanx_service.image_to_image(tmp_path, prompt, n, size)
-                return GenerateResponse(results=results)
-            finally:
-                # 3. 清理临时文件
-                if os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                        print(f"[Generate API] 临时文件已清理: {tmp_path}")
-                    except:
-                        pass
-        else:
-            # --- 文生图流程 ---
-            print(f"[Generate API] 接收到文生图请求，Prompt: {prompt}")
-            results = wanx_service.text_to_image(prompt, n, size)
-            return GenerateResponse(results=results)
-            
-    except Exception as e:
-        logging.exception("Image generation failed")
-        error_msg = str(e)
-        status_code = 500
+        # 保存上传文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
         
-        # 映射配额不足错误为 403 Forbidden
-        if "API 免费额度已耗尽" in error_msg or "AllocationQuota" in error_msg:
-            status_code = 403
-            
-        raise HTTPException(status_code=status_code, detail=f"Image generation failed: {error_msg}")
+        chosen_size = size
+        if preserve_reference_ratio and (size == "1024*1024"):
+            inferred = _infer_supported_size_from_image(tmp_path)
+            if inferred:
+                chosen_size = inferred
+
+        return _process_image_to_image(
+            tmp_path,
+            prompt,
+            context,
+            chosen_size,
+        )
+        
+    finally:
+        _cleanup_temp_file(tmp_path)
+
+
+def _image_to_image_from_url(
+    url: str,
+    prompt: str,
+    context: str | None,
+    size: str,
+    preserve_reference_ratio: bool = False,
+) -> tuple[list[str], str | None]:
+    """基于 URL 图片进行图生图"""
+    logger.info("【下载参考图片】: %s", url)
+    
+    tmp_path = None
+    
+    try:
+        last_error: Exception | None = None
+        response = None
+        for attempt in range(3):
+            try:
+                response = requests.get(url, timeout=30, stream=True)
+                response.raise_for_status()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                wait_s = 0.6 * (2**attempt)
+                logger.warning("参考图下载失败(第 %d 次)，%.1fs 后重试: %s", attempt + 1, wait_s, e)
+                time.sleep(wait_s)
+
+        if response is None or last_error is not None:
+            logger.warning("参考图下载最终失败，改为 URL 直传图生图（跳过视觉优化）: %s", last_error)
+            return _process_image_to_image_url_direct(
+                url,
+                prompt,
+                size,
+            )
+
+        suffix = _infer_extension_from_content_type(response.headers.get("content-type"))
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if chunk:
+                    tmp.write(chunk)
+
+        chosen_size = size
+        if preserve_reference_ratio and (size == "1024*1024"):
+            inferred = _infer_supported_size_from_image(tmp_path)
+            if inferred:
+                chosen_size = inferred
+
+        return _process_image_to_image(
+            tmp_path,
+            prompt,
+            context,
+            chosen_size,
+        )
+
+    finally:
+        _cleanup_temp_file(tmp_path)
+
+
+def _process_image_to_image_url_direct(
+    image_url: str,
+    prompt: str,
+    size: str,
+) -> tuple[list[str], str | None]:
+    """URL 直传给图生图接口的降级路径（避免因下载 URL 失败导致整次任务失败）。"""
+    results = volcengine_service.image_to_image(
+        image_url,
+        prompt,
+        size=size,
+    )
+    return results, VisionService._fallback_confirm_edit(prompt)
+
+
+def _process_image_to_image(
+    image_path: str,
+    prompt: str,
+    context: str | None,
+    size: str,
+) -> tuple[list[str], str | None]:
+    """
+    处理图生图的核心逻辑
+
+    1. 使用 DashScope qwen-vl-max 理解图片并优化提示词
+    2. 使用火山引擎图生图 API (传入参考图 + 优化后的提示词)
+    """
+    ratio_only, ratio_val = _is_ratio_only_prompt(prompt)
+    if ratio_only and ratio_val:
+        optimized_prompt = _apply_ratio_fill_instruction(ratio_val, prompt)
+    else:
+        optimized_prompt = prompt
+    assistant_confirm = VisionService._fallback_confirm_edit(prompt)
+
+    # 步骤2: 使用火山引擎图生图 API (传入参考图 + 提示词)
+    results = volcengine_service.image_to_image(
+        image_path,
+        optimized_prompt,
+        size=size,
+    )
+
+    return results, assistant_confirm
+
+
+def _text_to_image(
+    prompt: str,
+    context: str | None,
+    size: str,
+) -> tuple[list[str], str | None]:
+    """
+    处理文生图
+    
+    1. 使用 DashScope qwen-plus 优化提示词
+    2. 使用火山引擎生成图片
+    """
+    optimized_prompt = prompt
+    assistant_confirm = VisionService._fallback_confirm_text(prompt)
+    
+    # 步骤2: 使用火山引擎生成图片
+    results = volcengine_service.text_to_image(optimized_prompt, size=size)
+    return results, assistant_confirm
+
+
+def _get_file_extension(filename: str | None) -> str:
+    """获取文件扩展名"""
+    if filename:
+        _, ext = os.path.splitext(filename)
+        return ext or ".tmp"
+    return ".tmp"
+
+
+def _infer_extension_from_content_type(content_type: str | None) -> str:
+    """根据 Content-Type 推断文件扩展名"""
+    if not content_type:
+        return ".png"
+    
+    content_type = content_type.lower()
+    if "jpeg" in content_type or "jpg" in content_type:
+        return ".jpg"
+    if "webp" in content_type:
+        return ".webp"
+    return ".png"
+
+
+def _cleanup_temp_file(path: str | None) -> None:
+    """清理临时文件"""
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+            logger.debug("临时文件已清理: %s", path)
+        except OSError:
+            logger.warning("清理临时文件失败: %s", path)
+
+
+def _get_error_status_code(error_message: str) -> int:
+    """根据错误信息确定 HTTP 状态码"""
+    model_not_open_keywords = [
+        "ModelNotOpen",
+        "has not activated the model",
+        "Please activate the model service",
+        "Not Found",
+    ]
+    if any(keyword in error_message for keyword in model_not_open_keywords):
+        return 404
+    limit_keywords = ["SetLimitExceeded", "inference limit", "model service has been paused", "HTTP 429", " 429"]
+    if any(keyword in error_message for keyword in limit_keywords):
+        return 429
+    quota_keywords = ["免费额度已耗尽", "AllocationQuota", "quota"]
+    if any(keyword in error_message for keyword in quota_keywords):
+        return 403
+    return 500
+
+
+def _get_error_detail(error_message: str) -> str:
+    status_code = _get_error_status_code(error_message)
+    if status_code == 404:
+        return (
+            "图像生成失败：当前 VOLC_API_KEY 所属账号未开通/未激活当前模型（404 ModelNotOpen）。"
+            "请前往火山方舟控制台 Ark Console -> Model Activation 激活模型，"
+            "或将后端配置中的 VOLC_IMAGE_MODEL 改为该账号已开通的模型后再试。"
+        )
+    if status_code == 429:
+        return (
+            "图像生成失败：当前账号已触发 doubao-seedream 模型推理限制（429 SetLimitExceeded）。"
+            "请前往火山方舟控制台的 Model Activation 页面检查/开通对应模型权限，"
+            "或调整/关闭 Safe Experience Mode 后再试。"
+        )
+    if status_code == 403:
+        return "图像生成失败：当前账号额度/配额不足，请检查控制台配额后再试。"
+    return f"图像生成失败: {error_message}"
