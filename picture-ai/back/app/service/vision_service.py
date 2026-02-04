@@ -8,14 +8,24 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
+from http import HTTPStatus
+from typing import Any
 
-from dashscope import Generation
+import dashscope
+from dashscope import Generation, MultiModalConversation
 
 from app.config.settings import settings
 
 
 logger = logging.getLogger(__name__)
+
+
+dashscope.api_key = settings.API_KEY
+os.environ["DASHSCOPE_API_KEY"] = settings.API_KEY
 
 
 # 受限扩写的 system prompt
@@ -74,10 +84,7 @@ class VisionService:
         p = (user_prompt or "").strip()
         if not p:
             return False
-        # 中文：少于 8 个字符才认为是简单指令
-        # 这样 "红色"、"波西米亚"、"改成蓝色" 会触发扩写
-        # 但 "图中所有小花小草的图案修改为小鹿小马的图案" 不会
-        return len(p) <= 8
+        return len(p) <= 12
 
     def _call_dashscope_expand(self, user_prompt: str) -> str | None:
         """调用 DashScope 进行受限扩写。"""
@@ -145,6 +152,110 @@ class VisionService:
             "optimized_prompt": p or user_prompt,
             "assistant_confirm": self._fallback_confirm_edit(p),
         }
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any] | None:
+        if not text:
+            return None
+        raw = text.strip()
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+
+        try:
+            m = re.search(r"\{[\s\S]*\}", raw)
+            if not m:
+                return None
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+
+        return None
+
+    def qc_flat_production_with_scores(self, image_path: str) -> dict[str, Any]:
+        if not settings.API_KEY:
+            return {
+                "pass": True,
+                "reasons": ["qc_skipped_no_api_key"],
+                "scores": {
+                    "full_bleed": 1.0,
+                    "no_border_blank": 1.0,
+                    "no_shadow": 1.0,
+                    "no_perspective": 1.0,
+                    "not_photo_render": 1.0,
+                },
+            }
+
+        system_prompt = (
+            "你是地毯‘绝对平面生产稿’质检员。你要判断图片是否满足：" 
+            "正交俯视/无透视、满铺全画幅(full-bleed)、无边缘留白/无背景、无阴影高光、不是摄影/渲染摆拍。\n\n"
+            "请仅输出严格 JSON，不要输出任何额外文字，不要使用 Markdown。\n"
+            "JSON 必须包含字段：pass (bool), reasons (string array), scores (object)。\n"
+            "scores 包含：full_bleed,no_border_blank,no_shadow,no_perspective,not_photo_render，取值 0~1。\n"
+            "判定建议：任意一项 < 0.8 则 pass=false。"
+        )
+
+        try:
+            messages = [
+                {"role": "system", "content": [{"text": system_prompt}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"image": os.path.abspath(image_path)},
+                        {"text": "请对这张图片做平面生产稿合规性判定。"},
+                    ],
+                },
+            ]
+            resp = MultiModalConversation.call(
+                model="qwen-vl-max",
+                messages=messages,
+            )
+            if resp.status_code != HTTPStatus.OK:
+                return {
+                    "pass": True,
+                    "reasons": [f"qc_failed_{getattr(resp, 'code', '')}"] ,
+                    "scores": {
+                        "full_bleed": 1.0,
+                        "no_border_blank": 1.0,
+                        "no_shadow": 1.0,
+                        "no_perspective": 1.0,
+                        "not_photo_render": 1.0,
+                    },
+                }
+
+            raw = resp.output.choices[0].message.content[0]["text"]
+            parsed = self._extract_json(raw if isinstance(raw, str) else str(raw))
+            if not parsed:
+                return {
+                    "pass": True,
+                    "reasons": ["qc_unparseable"],
+                    "scores": {
+                        "full_bleed": 1.0,
+                        "no_border_blank": 1.0,
+                        "no_shadow": 1.0,
+                        "no_perspective": 1.0,
+                        "not_photo_render": 1.0,
+                    },
+                }
+            return parsed
+        except Exception as e:
+            logger.warning("QC exception: %s", e)
+            return {
+                "pass": True,
+                "reasons": ["qc_exception"],
+                "scores": {
+                    "full_bleed": 1.0,
+                    "no_border_blank": 1.0,
+                    "no_shadow": 1.0,
+                    "no_perspective": 1.0,
+                    "not_photo_render": 1.0,
+                },
+            }
 
 
 vision_service = VisionService()

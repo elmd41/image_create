@@ -142,6 +142,8 @@ class VolcengineService:
         self,
         prompt: str,
         size: str = "1024*1024",
+        negative_prompt: str | None = None,
+        seed: int | None = None,
     ) -> list[str]:
         payload: dict[str, Any] = {
             "model": getattr(settings, "VOLC_IMAGE_MODEL"),
@@ -151,6 +153,10 @@ class VolcengineService:
             "stream": False,
             "watermark": False,
         }
+        if negative_prompt:
+            payload["negative_prompt"] = negative_prompt
+        if seed is not None:
+            payload["seed"] = int(seed)
         result = self._post(payload)
         return self._parse_urls(result)
 
@@ -159,6 +165,8 @@ class VolcengineService:
         image_path_or_url: str,
         prompt: str,
         size: str = "1024*1024",
+        negative_prompt: str | None = None,
+        seed: int | None = None,
     ) -> list[str]:
         tmp_path: str | None = None
         try:
@@ -208,6 +216,10 @@ class VolcengineService:
                 "stream": False,
                 "watermark": False,
             }
+            if negative_prompt:
+                payload["negative_prompt"] = negative_prompt
+            if seed is not None:
+                payload["seed"] = int(seed)
             result = self._post(payload)
             return self._parse_urls(result)
         finally:

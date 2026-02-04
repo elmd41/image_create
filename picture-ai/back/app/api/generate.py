@@ -19,7 +19,9 @@ import re
 import shutil
 import tempfile
 import time
+import uuid
 
+import numpy as np
 import requests
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -27,6 +29,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from app.config.settings import settings
+from app.service.segmentation.rule_segmenter import segment_rug_layers
 from app.service.volcengine_service import volcengine_service
 from app.service.vision_service import VisionService, vision_service
 
@@ -41,6 +44,31 @@ DEFAULT_SCENE_VALUE = "平面设计图"
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     t = (text or "").lower()
     return any(k.lower() in t for k in keywords)
+
+
+def _strip_carpet_prefix(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("地毯图，"):
+        return t[len("地毯图，") :].strip()
+    if t.startswith("地毯，"):
+        return t[len("地毯，") :].strip()
+    if t.startswith("地毯图"):
+        return t[len("地毯图") :].strip("， ")
+    if t.startswith("地毯"):
+        return t[len("地毯") :].strip("， ")
+    return t
+
+
+def _wrap_flat_design_production_prompt(pattern_desc: str) -> str:
+    desc = (pattern_desc or "").strip()
+    if not desc:
+        desc = "地毯印花图案"
+    return (
+        f"一张绝对平面的工业级地毯印花生产稿，{desc}。"
+        "正交投影视图，无透视，无立体感。完整地毯全貌。"
+        "二维矢量图风格，色彩平涂，无材质纹理，无光影效果。"
+        "没有任何其他元素，不是实物照片。"
+    )
 
 
 def _expand_simple_prompt(user_prompt: str | None) -> str:
@@ -79,6 +107,10 @@ def _wants_perspective_or_scene(user_prompt: str) -> bool:
     
     如果包含这些词汇，则不添加默认场景"平面设计图"。
     """
+    t = (user_prompt or "").strip().lower()
+    if re.search(r"(无|没有|不要|去掉|去除|移除)\s*背景", t):
+        t = re.sub(r"背景", "", t)
+
     keywords = (
         # 透视/角度
         "透视", "斜", "侧面", "侧视", "角度", "俯视", "仰视",
@@ -97,7 +129,7 @@ def _wants_perspective_or_scene(user_prompt: str) -> bool:
         "render", "perspective", "angled", "interior", "room",
         "scene", "floor", "lifestyle", "texture", "closeup",
     )
-    return _contains_any(user_prompt, keywords)
+    return _contains_any(t, keywords)
 
 
 def _is_default_scene(scene: str | None) -> bool:
@@ -113,6 +145,84 @@ def _scene_to_prompt(scene: str | None) -> str | None:
 
 def _is_flat_mode(user_prompt: str, scene: str | None) -> bool:
     return _is_default_scene(scene)
+
+
+def _flat_negative_prompt(level: int = 0) -> str:
+    base = (
+        "perspective, angled view, 3d, render, mockup, product photo, photo, photography, "
+        "shadow, shading, lighting, highlight, reflection, vignette, "
+        "room, interior, floor, wall, furniture, scene, background, "
+        "rug edge, border, frame, stitching, seam, fringe, fold, curled corner, "
+        "fabric texture, fiber, threads, wrinkles"
+    )
+    if level <= 0:
+        return base
+    return base + ", depth of field, bokeh, realistic, material, thickness"
+
+
+def _flat_retry_prompt(prompt: str) -> str:
+    p = (prompt or "").strip()
+    extra = (
+        " 必须正交俯视，无透视。必须满铺全画幅(full-bleed)，不要边缘，不要留白，不要背景。"
+        " 必须二维平面，无阴影无高光无材质纹理，不要摄影/摆拍/渲染。"
+    )
+    return (p + extra).strip()
+
+
+def _download_image_to_temp(url: str) -> str:
+    resp = requests.get(url, timeout=45)
+    resp.raise_for_status()
+    suffix = ".png"
+    ct = (resp.headers.get("content-type") or "").lower()
+    if "jpeg" in ct or "jpg" in ct:
+        suffix = ".jpg"
+    elif "webp" in ct:
+        suffix = ".webp"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(resp.content)
+        return tmp.name
+
+
+def _full_bleed_crop_fallback(image_path: str) -> Image.Image | None:
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+
+    rgb = np.asarray(img, dtype=np.uint8)
+    bgr = rgb[:, :, ::-1].copy()
+    try:
+        masks = segment_rug_layers(bgr, alpha=0.22)
+        rug = masks.get("rug_mask")
+    except Exception:
+        rug = None
+    if rug is None or not isinstance(rug, np.ndarray) or rug.ndim != 2:
+        return img
+
+    m = rug.astype(np.uint8) > 0
+    ys, xs = np.where(m)
+    if ys.size == 0 or xs.size == 0:
+        return img
+
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0 = max(0, y0)
+    x0 = max(0, x0)
+    y1 = min(rgb.shape[0], y1)
+    x1 = min(rgb.shape[1], x1)
+    cropped = rgb[y0:y1, x0:x1, :]
+    out = Image.fromarray(cropped.astype(np.uint8), mode="RGB")
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    out = out.resize(img.size, resample=resample)
+    return out
+
+
+def _save_generated_image(img: Image.Image, request: Request, prefix: str = "flat") -> str:
+    filename = f"{prefix}_{uuid.uuid4().hex}.png"
+    out_path = settings.GENERATED_PATH / filename
+    img.save(out_path, format="PNG")
+    base_url = str(request.base_url).rstrip("/")
+    return f"{base_url}/generated/{filename}"
 
 
 # ==================== 响应模型 ====================
@@ -142,7 +252,7 @@ def proxy_image(url: str) -> Response:
 # ==================== API 端点 ====================
 
 @router.post("/generate", response_model=GenerateResponse)
-def generate(
+async def generate(
     request: Request,
     prompt: str = Form("", description="生成提示词"),
     file: UploadFile | None = File(None, description="参考图片"),
@@ -184,49 +294,55 @@ def generate(
     logger.info("【主体颜色】: %s", color if color else "未指定")
     logger.info("【图结构】: %s", scene if scene else "默认(平面设计图)")
 
-    # 先对用户原始输入进行扩写（在参数拼接前）
-    expanded_prompt = _expand_simple_prompt(prompt)
-    if expanded_prompt != prompt:
-        logger.info("【扩写后】: %s", expanded_prompt)
-    
-    prompt_with_subject = _ensure_carpet_subject(expanded_prompt)
-
-    # 构建增强提示词：将用户选择的参数加入到 prompt 中
-    base_prompt = _build_enhanced_prompt(prompt_with_subject, style, ratio, color, scene)
-    enhanced_prompt = base_prompt
+    # 图生图与文生图业务分离：
+    # - 图生图：不扩写、不注入默认场景/工业模板，仅使用用户指令 + 参数
+    # - 文生图：可对短输入受限扩写，并在默认场景下套工业模板
+    raw_prompt_with_subject = _ensure_carpet_subject(prompt)
+    edit_prompt = _build_enhanced_prompt(
+        raw_prompt_with_subject,
+        style,
+        ratio,
+        color,
+        None,
+        apply_flat_template=False,
+    )
 
     try:
-        prompt_attempt = enhanced_prompt
+        prompt_attempt = ""
 
         ratio_in_prompt = re.search(r"\d+\s*:\s*\d+", (prompt or "")) is not None
         preserve_reference_ratio = (not ratio) and (not ratio_in_prompt) and (size == "1024*1024")
 
         if file:
+            prompt_attempt = edit_prompt
             logger.info("【增强提示词】: %s", prompt_attempt)
             logger.info("【模式】: 图生图 (上传图片)")
             results, assistant_confirm = _image_to_image_from_upload(
                 file,
-                prompt_attempt,
+                edit_prompt,
                 None,
                 size,
                 preserve_reference_ratio=preserve_reference_ratio,
             )
         elif reference_url:
+            prompt_attempt = edit_prompt
             logger.info("【增强提示词】: %s", prompt_attempt)
             logger.info("【模式】: 图生图 (URL引用)")
             results, assistant_confirm = _image_to_image_from_url(
                 reference_url,
-                prompt_attempt,
+                edit_prompt,
                 None,
                 size,
                 preserve_reference_ratio=preserve_reference_ratio,
             )
         else:
-            inferred = _infer_generate_action(base_prompt, context)
+            inferred = _infer_generate_action(edit_prompt, context)
             if inferred["action"] == "image_to_image" and inferred.get("reference_url"):
-                ratio_only_from_text, ratio_val = _is_ratio_only_prompt(base_prompt)
+                ratio_only_from_text, ratio_val = _is_ratio_only_prompt(edit_prompt)
                 if ratio_only_from_text and ratio_val:
-                    prompt_attempt = _apply_ratio_fill_instruction(ratio_val, base_prompt)
+                    prompt_attempt = _apply_ratio_fill_instruction(ratio_val, edit_prompt)
+                else:
+                    prompt_attempt = edit_prompt
                 logger.info("【增强提示词】: %s", prompt_attempt)
                 logger.info("【模式】: 图生图 (上下文推断) | reference_url=%s", inferred.get("reference_url"))
                 results, assistant_confirm = _image_to_image_from_url(
@@ -237,14 +353,30 @@ def generate(
                     preserve_reference_ratio=preserve_reference_ratio,
                 )
             else:
-                prompt_attempt = base_prompt
+                # 文生图：先对用户原始输入进行扩写（在参数拼接前）
+                expanded_prompt = _expand_simple_prompt(prompt)
+                if expanded_prompt != prompt:
+                    logger.info("【扩写后】: %s", expanded_prompt)
+                prompt_with_subject = _ensure_carpet_subject(expanded_prompt)
+                prompt_attempt = _build_enhanced_prompt(
+                    prompt_with_subject,
+                    style,
+                    ratio,
+                    color,
+                    scene,
+                    apply_flat_template=True,
+                )
                 logger.info("【增强提示词】: %s", prompt_attempt)
                 logger.info("【模式】: 文生图 (上下文推断)")
-                results, assistant_confirm = _text_to_image(
-                    prompt_attempt,
-                    None,
-                    size,
-                )
+                flat_mode = _is_default_scene(scene) and (not _wants_perspective_or_scene(prompt_with_subject or ""))
+                if flat_mode and bool(getattr(settings, "GENERATE_FLAT_QC_ENABLED", True)):
+                    results, assistant_confirm = _text_to_image_flat_stable(request, prompt_attempt, size)
+                else:
+                    results, assistant_confirm = _text_to_image(
+                        prompt_attempt,
+                        None,
+                        size,
+                    )
 
         logger.info("【生成成功】: %s", results)
         logger.info("=" * 70)
@@ -340,6 +472,7 @@ def _build_enhanced_prompt(
     ratio: str | None,
     color: str | None,
     scene: str | None,
+    apply_flat_template: bool = True,
 ) -> str:
     """
     将用户选择的参数融入到原始提示词中
@@ -480,17 +613,17 @@ def _build_enhanced_prompt(
     elif ratio == "满铺":
         parts.append("满铺")
 
-    # 判断是否需要添加场景描述
-    # 如果用户输入已包含场景词，则不添加默认场景
+    # 场景/图结构处理
+    # - 默认场景：仅当 apply_flat_template=True 且用户输入不包含场景词时启用（并套用工业级生产稿模板）
+    # - 非默认场景：按用户选择的场景执行
     use_default_scene = False
-    if not _wants_perspective_or_scene(prompt or ""):
-        scene_desc = _scene_to_prompt(scene)
-        if scene_desc and scene_desc not in (prompt or ""):
-            # 默认场景"平面设计图"需要前置
-            if scene_desc == DEFAULT_SCENE_VALUE:
-                use_default_scene = True
-            else:
-                parts.append(scene_desc)
+    scene_desc = _scene_to_prompt(scene)
+    if scene_desc == DEFAULT_SCENE_VALUE:
+        if apply_flat_template and (not _wants_perspective_or_scene(prompt or "")):
+            use_default_scene = True
+    elif scene_desc:
+        if scene_desc not in (prompt or ""):
+            parts.append(scene_desc)
     
     # 组合提示词
     if parts:
@@ -509,7 +642,7 @@ def _build_enhanced_prompt(
             base_content = "地毯图，" + base_content[3:]
         elif base_content.startswith("地毯"):
             base_content = "地毯图" + base_content[2:]
-        enhanced = f"{DEFAULT_SCENE_VALUE}，{base_content}"
+        enhanced = _wrap_flat_design_production_prompt(_strip_carpet_prefix(base_content))
     else:
         enhanced = base_content
     
@@ -765,6 +898,74 @@ def _text_to_image(
     # 使用火山引擎生成图片
     results = volcengine_service.text_to_image(prompt, size=size)
     return results, assistant_confirm
+
+
+def _text_to_image_flat_stable(
+    request: Request,
+    prompt: str,
+    size: str,
+) -> tuple[list[str], str | None]:
+    assistant_confirm = VisionService._fallback_confirm_text(prompt)
+    max_attempts = int(getattr(settings, "GENERATE_FLAT_QC_MAX_RETRIES", 2))
+    max_attempts = max(1, min(3, max_attempts))
+
+    last_url: str | None = None
+    last_tmp: str | None = None
+
+    try:
+        for attempt in range(max_attempts):
+            seed = int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF
+            negative = _flat_negative_prompt(level=1 if attempt > 0 else 0)
+            prompt_run = _flat_retry_prompt(prompt) if attempt > 0 else prompt
+
+            logger.info("【flat生成】attempt=%d/%d seed=%s", attempt + 1, max_attempts, seed)
+            logger.info("【flat生成】negative: %s", negative)
+            urls = volcengine_service.text_to_image(
+                prompt_run,
+                size=size,
+                negative_prompt=negative,
+                seed=seed,
+            )
+            if not urls:
+                raise RuntimeError("volc returned empty urls")
+            last_url = urls[0]
+
+            if last_tmp:
+                _cleanup_temp_file(last_tmp)
+                last_tmp = None
+            last_tmp = _download_image_to_temp(last_url)
+
+            qc = vision_service.qc_flat_production_with_scores(last_tmp)
+            logger.info("【flat QC】%s", qc)
+
+            passed = bool(qc.get("pass")) if isinstance(qc, dict) else True
+            if (not passed) and isinstance(qc, dict):
+                scores = qc.get("scores") or {}
+                if isinstance(scores, dict) and scores:
+                    passed = all(float(scores.get(k, 1.0)) >= 0.8 for k in (
+                        "full_bleed",
+                        "no_border_blank",
+                        "no_shadow",
+                        "no_perspective",
+                        "not_photo_render",
+                    ))
+
+            if passed:
+                img = Image.open(last_tmp).convert("RGB")
+                url = _save_generated_image(img, request, prefix="flat")
+                return [url], assistant_confirm
+
+        img = _full_bleed_crop_fallback(last_tmp) if last_tmp else None
+        if img is None and last_tmp:
+            img = Image.open(last_tmp).convert("RGB")
+        if img is None:
+            raise RuntimeError("flat fallback failed")
+
+        fail_url = _save_generated_image(img, request, prefix="flat")
+        return [fail_url], assistant_confirm
+    finally:
+        if last_tmp:
+            _cleanup_temp_file(last_tmp)
 
 
 def _get_file_extension(filename: str | None) -> str:
