@@ -4,8 +4,8 @@ import numpy as np
 
 
 LAYER_ORDER = (
-    "border",
     "field",
+    "border",
     "rug",
     "background",
 )

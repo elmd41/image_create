@@ -21,26 +21,55 @@ def translate_prompt_to_params(prompt: str, layer: str | None = None) -> dict:
     if m:
         return {"mode": "recolor", "color_hex": f"#{m.group('hex').upper()}"}
 
-    # common colors
+    # common colors (expanded per MVP spec)
     color_map = {
+        # 红色系
+        "深红": "#8B0000",
+        "酒红": "#722F37",
+        "暗红": "#8B0000",
         "红": "#E11D48",
+        "浅红": "#F87171",
+        # 蓝色系
+        "藏蓝": "#003153",
+        "深蓝": "#1E3A5F",
         "蓝": "#2563EB",
+        "浅蓝": "#93C5FD",
+        "天蓝": "#87CEEB",
+        # 绿色系
+        "深绿": "#14532D",
         "绿": "#16A34A",
+        "浅绿": "#86EFAC",
+        # 黑白灰
         "黑": "#111827",
-        "白": "#F9FAFB",
+        "深灰": "#374151",
         "灰": "#9CA3AF",
+        "浅灰": "#D1D5DB",
+        "白": "#F9FAFB",
+        "米白": "#FAF5EF",
+        "象牙白": "#FFFFF0",
+        # 棕色系
+        "深棕": "#5D4037",
+        "棕": "#92400E",
+        "驼": "#C19A6B",
+        "驼色": "#C19A6B",
+        "米": "#D6C7B2",
+        "米色": "#D6C7B2",
+        "卡其": "#C3B091",
+        # 其他
         "金": "#D4AF37",
         "银": "#C0C0C0",
-        "米": "#D6C7B2",
-        "棕": "#92400E",
         "粉": "#EC4899",
         "紫": "#7C3AED",
         "橙": "#F97316",
         "黄": "#F59E0B",
+        "青": "#06B6D4",
+        "靛": "#4F46E5",
     }
-    for k, v in color_map.items():
+    # Match longer keys first to avoid partial matches
+    for k in sorted(color_map.keys(), key=len, reverse=True):
+        v = color_map[k]
         if f"{k}色" in p or p == k or k in p:
-            if any(w in p for w in ("改成", "换成", "变成", "调成", "改为")) or "颜色" in p:
+            if any(w in p for w in ("改成", "换成", "变成", "调成", "改为")) or "颜色" in p or k in p:
                 return {"mode": "recolor", "color_hex": v}
 
     # brightness/saturation/contrast adjustments

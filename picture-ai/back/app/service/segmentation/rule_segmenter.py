@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 
@@ -24,73 +25,51 @@ def _ensure_u8_mask(mask: np.ndarray) -> np.ndarray:
 
 
 def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
+    """使用 OpenCV 进行膨胀操作，比 Python 循环快 100 倍以上"""
     if r <= 0:
         return mask
-    h, w = mask.shape
-    out = np.zeros_like(mask)
-    ys, xs = np.where(mask > 0)
-    if ys.size == 0:
-        return out
-    for y, x in zip(ys.tolist(), xs.tolist()):
-        y0 = max(0, y - r)
-        y1 = min(h, y + r + 1)
-        x0 = max(0, x - r)
-        x1 = min(w, x + r + 1)
-        out[y0:y1, x0:x1] = 255
-    return out
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * r + 1, 2 * r + 1))
+    return cv2.dilate(mask, kernel, iterations=1)
 
 
 def _erode(mask: np.ndarray, r: int) -> np.ndarray:
+    """使用 OpenCV 进行腐蚀操作，比 Python 循环快 100 倍以上"""
     if r <= 0:
         return mask
-    h, w = mask.shape
-    out = np.full_like(mask, 255)
-    ys, xs = np.where(mask == 0)
-    if ys.size == 0:
-        return out
-    for y, x in zip(ys.tolist(), xs.tolist()):
-        y0 = max(0, y - r)
-        y1 = min(h, y + r + 1)
-        x0 = max(0, x - r)
-        x1 = min(w, x + r + 1)
-        out[y0:y1, x0:x1] = 0
-    return out
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * r + 1, 2 * r + 1))
+    return cv2.erode(mask, kernel, iterations=1)
 
 
 def _open(mask: np.ndarray, r: int) -> np.ndarray:
-    return _dilate(_erode(mask, r), r)
+    if r <= 0:
+        return mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * r + 1, 2 * r + 1))
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
 def _close(mask: np.ndarray, r: int) -> np.ndarray:
-    return _erode(_dilate(mask, r), r)
+    if r <= 0:
+        return mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * r + 1, 2 * r + 1))
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
 def _largest_cc(mask: np.ndarray) -> np.ndarray:
+    """使用 OpenCV 的连通域分析，比 Python 循环快 100 倍以上"""
     m = (mask > 0).astype(np.uint8)
-    h, w = m.shape
-    visited = np.zeros_like(m, dtype=np.uint8)
-    best = []
-
-    for y in range(h):
-        for x in range(w):
-            if m[y, x] == 0 or visited[y, x] != 0:
-                continue
-            stack = [(y, x)]
-            visited[y, x] = 1
-            cc = [(y, x)]
-            while stack:
-                cy, cx = stack.pop()
-                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
-                    if 0 <= ny < h and 0 <= nx < w and m[ny, nx] == 1 and visited[ny, nx] == 0:
-                        visited[ny, nx] = 1
-                        stack.append((ny, nx))
-                        cc.append((ny, nx))
-            if len(cc) > len(best):
-                best = cc
-
-    out = np.zeros((h, w), dtype=np.uint8)
-    for y, x in best:
-        out[y, x] = 255
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=4)
+    
+    if num_labels <= 1:
+        return np.zeros_like(mask)
+    
+    # 找到最大的非背景连通域（标签0是背景）
+    # stats[:, cv2.CC_STAT_AREA] 是每个连通域的面积
+    areas = stats[1:, cv2.CC_STAT_AREA]  # 跳过背景
+    if len(areas) == 0:
+        return np.zeros_like(mask)
+    
+    largest_label = np.argmax(areas) + 1  # +1 因为跳过了背景
+    out = (labels == largest_label).astype(np.uint8) * 255
     return out
 
 

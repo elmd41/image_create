@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.api import conversations, generate, search
+from app.api import conversations, generate, interactive, search
 from app.config.settings import settings
 
 
@@ -129,8 +129,24 @@ def create_app() -> FastAPI:
     return app
 
 
+class StaticFilesCORSMiddleware(BaseHTTPMiddleware):
+    """为静态文件添加 CORS 头的中间件"""
+    
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # 为静态文件路径添加 CORS 头
+        if request.url.path.startswith(('/static/', '/generated/')):
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = '*'
+        return response
+
+
 def _configure_cors(app: FastAPI) -> None:
     """配置跨域资源共享 (CORS)"""
+    # 先添加静态文件 CORS 中间件
+    app.add_middleware(StaticFilesCORSMiddleware)
+    # 再添加通用 CORS 中间件
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # 生产环境应配置具体域名
@@ -161,6 +177,7 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(search.router, prefix="/api", tags=["搜索"])
     app.include_router(generate.router, prefix="/api", tags=["生成"])
     app.include_router(conversations.router, prefix="/api", tags=["会话"])
+    app.include_router(interactive.router, prefix="/api", tags=["分层编辑"])
 
 
     @app.get("/", tags=["系统"])

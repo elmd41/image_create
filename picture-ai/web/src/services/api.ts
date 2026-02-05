@@ -59,3 +59,126 @@ export const generate = async (formData: FormData, signal?: AbortSignal) => {
   const responseData = await response.json();
   return { data: responseData };
 };
+
+// ==================== 分层编辑 API ====================
+
+export interface InteractiveUploadResponse {
+  session_id: string;
+  meta: {
+    w: number;
+    h: number;
+    seg_mode: string;
+    alpha_val: number;
+    filename?: string;
+  };
+}
+
+export interface InteractivePickResponse {
+  layer: string;
+  mask_png_base64: string;
+}
+
+export interface InteractiveEditResponse {
+  result_png_base64: string;
+  layer_mask_png_base64: string;
+  applied_params: Record<string, unknown>;
+}
+
+/**
+ * 上传图片并创建编辑 session
+ * POST /api/interactive/upload
+ */
+export const interactiveUpload = async (
+  file: File,
+  signal?: AbortSignal
+): Promise<InteractiveUploadResponse> => {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(`${API_BASE_URL}/api/interactive/upload`, {
+    method: 'POST',
+    body: formData,
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+/**
+ * 点击拾取层
+ * POST /api/interactive/pick
+ */
+export const interactivePick = async (
+  sessionId: string,
+  x: number,
+  y: number,
+  signal?: AbortSignal
+): Promise<InteractivePickResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/interactive/pick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, x, y }),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+/**
+ * 应用编辑到选中层
+ * POST /api/interactive/edit
+ */
+export const interactiveEdit = async (
+  sessionId: string,
+  layer: string,
+  prompt: string,
+  signal?: AbortSignal
+): Promise<InteractiveEditResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/interactive/edit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, layer, prompt }),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+/**
+ * 代理下载外部图片（绕过 CORS 限制）
+ * POST /api/interactive/proxy-image
+ */
+export interface ProxyImageResponse {
+  image_base64: string;
+  content_type: string;
+}
+
+export const proxyImage = async (
+  url: string,
+  signal?: AbortSignal
+): Promise<ProxyImageResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/interactive/proxy-image`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};

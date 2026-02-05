@@ -33,7 +33,15 @@ import {
   CloseOutlined,
 } from '@ant-design/icons';
 import type { UploadFile } from 'antd/es/upload/interface';
-import { search, generate } from './services/api';
+import {
+  search,
+  generate,
+  interactiveUpload,
+  interactivePick,
+  interactiveEdit,
+  proxyImage,
+  InteractiveUploadResponse,
+} from './services/api';
 
 // ==================== 常量 ====================
 
@@ -252,12 +260,47 @@ const RgbPalettePicker: React.FC<{
 
 // ==================== 主组件 ====================
 
+// ==================== 编辑态类型 ====================
+
+interface EditModeState {
+  active: boolean;
+  sessionId: string | null;
+  currentImageDataUrl: string | null;
+  maskDataUrl: string | null;
+  selectedLayer: string | null;
+  meta: InteractiveUploadResponse['meta'] | null;
+  editLoading: boolean;
+  history: string[]; // 编辑历史（dataUrl 数组）
+}
+
+const initialEditModeState: EditModeState = {
+  active: false,
+  sessionId: null,
+  currentImageDataUrl: null,
+  maskDataUrl: null,
+  selectedLayer: null,
+  meta: null,
+  editLoading: false,
+  history: [],
+};
+
+// 顶部 Tab 类型
+type AppTab = 'chat' | 'edit';
+
 const App: React.FC = () => {
   // 状态
   const [chatHistory, setChatHistory] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // 编辑态状态
+  const [editMode, setEditMode] = useState<EditModeState>(initialEditModeState);
+  const [editPrompt, setEditPrompt] = useState('');
+  const editCanvasRef = useRef<HTMLDivElement | null>(null);
+  
+  // 顶部 Tab 切换
+  const [activeTab, setActiveTab] = useState<AppTab>('chat');
 
   // 生成参数状态
   const [generateParams, setGenerateParams] = useState<GenerateParams>({
@@ -335,12 +378,14 @@ const App: React.FC = () => {
 
   const messages = chatHistory;
 
-  const scrollToBottom = useCallback(() => {
+  const scrollToBottom = useCallback((instant = false) => {
     requestAnimationFrame(() => {
       if (chatAreaRef.current) {
         chatAreaRef.current.scrollTop = chatAreaRef.current.scrollHeight;
       }
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      if (!instant) {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
     });
   }, []);
 
@@ -370,6 +415,289 @@ const App: React.FC = () => {
     const blob = await response.blob();
     return new File([blob], filename, { type: blob.type || 'image/png' });
   };
+
+  // ==================== 编辑态处理 ====================
+
+  // 编辑态加载状态（独立于 editMode，用于控制全局 loading 提示）
+  const [editModeLoading, setEditModeLoading] = useState(false);
+
+  const enterEditMode = useCallback(async (imageSource: string | File) => {
+    // 设置加载状态，显示持久 loading
+    setEditModeLoading(true);
+    
+    // 如果当前有编辑中的图片，保存到历史中以便撤回
+    const previousHistory = editMode.currentImageDataUrl 
+      ? [...editMode.history, editMode.currentImageDataUrl]
+      : [];
+    
+    try {
+      let file: File;
+      let dataUrl: string;
+      
+      if (typeof imageSource === 'string') {
+        console.log('[enterEditMode] imageSource:', imageSource);
+        
+        // 如果是 dataUrl，直接使用
+        if (imageSource.startsWith('data:')) {
+          dataUrl = imageSource;
+          const response = await fetch(imageSource);
+          const blob = await response.blob();
+          file = new File([blob], 'edit_image.png', { type: blob.type || 'image/png' });
+        } else if (imageSource.startsWith('blob:')) {
+          // blob: URL 需要直接 fetch
+          const response = await fetch(imageSource);
+          const blob = await response.blob();
+          file = new File([blob], 'edit_image.png', { type: blob.type || 'image/png' });
+          dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error('读取图片失败'));
+            reader.readAsDataURL(blob);
+          });
+        } else {
+          // 处理 URL（可能是相对路径、绝对路径或外部 URL）
+          let fullUrl = imageSource;
+          
+          // 如果是相对路径，补全为绝对路径
+          if (imageSource.startsWith('/')) {
+            fullUrl = `${API_URL}${imageSource}`;
+          } else if (!imageSource.startsWith('http')) {
+            fullUrl = `${API_URL}/${imageSource}`;
+          }
+          
+          console.log('[enterEditMode] fetching:', fullUrl);
+          
+          // 判断是否为外部 URL（非本地后端）
+          const isExternalUrl = fullUrl.startsWith('http') && !fullUrl.startsWith(API_URL);
+          
+          let loadedBlob: Blob;
+          
+          if (isExternalUrl) {
+            // 外部 URL 使用后端代理下载（绕过 CORS）
+            console.log('[enterEditMode] using proxy for external URL');
+            const proxyResult = await proxyImage(fullUrl);
+            const binaryStr = atob(proxyResult.image_base64);
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++) {
+              bytes[i] = binaryStr.charCodeAt(i);
+            }
+            loadedBlob = new Blob([bytes], { type: proxyResult.content_type });
+            dataUrl = `data:${proxyResult.content_type};base64,${proxyResult.image_base64}`;
+          } else {
+            // 本地 URL 使用 img 元素加载
+            const img = new window.Image();
+            img.crossOrigin = 'anonymous';
+            
+            loadedBlob = await new Promise<Blob>((resolve, reject) => {
+              img.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                  reject(new Error('无法创建 canvas context'));
+                  return;
+                }
+                ctx.drawImage(img, 0, 0);
+                canvas.toBlob(
+                  (blob) => {
+                    if (blob) {
+                      resolve(blob);
+                    } else {
+                      reject(new Error('无法转换图片为 blob'));
+                    }
+                  },
+                  'image/png'
+                );
+              };
+              img.onerror = () => {
+                reject(new Error(`无法加载图片: ${fullUrl}`));
+              };
+              img.src = fullUrl;
+            });
+            
+            // 将 blob 转为 dataUrl 用于显示
+            dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = () => reject(new Error('读取图片失败'));
+              reader.readAsDataURL(loadedBlob);
+            });
+          }
+          
+          file = new File([loadedBlob], 'edit_image.png', { type: 'image/png' });
+        }
+      } else {
+        file = imageSource;
+        // 将文件转为 dataUrl 用于显示
+        dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('读取图片失败'));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      const result = await interactiveUpload(file);
+
+      // 如果有之前的图片历史，保留它们以便撤回
+      const newHistory = previousHistory.length > 0 
+        ? [...previousHistory, dataUrl]  // 保留之前的历史 + 新图片
+        : [dataUrl];  // 初始图片作为历史第一项
+      
+      setEditMode({
+        active: true,
+        sessionId: result.session_id,
+        currentImageDataUrl: dataUrl,
+        maskDataUrl: null,
+        selectedLayer: null,
+        meta: result.meta,
+        editLoading: false,
+        history: newHistory,
+      });
+      setEditPrompt('');
+      setActiveTab('edit');  // 自动切换到编辑 Tab
+      message.success('已进入编辑模式');
+    } catch (error) {
+      console.error('进入编辑模式失败:', error);
+      const errorMsg = error instanceof Error ? error.message : '未知错误';
+      message.error(`进入编辑模式失败: ${errorMsg}`);
+    } finally {
+      setEditModeLoading(false);
+    }
+  }, [editMode.currentImageDataUrl, editMode.history]);
+
+  const exitEditMode = useCallback(() => {
+    setEditMode(initialEditModeState);
+    setEditPrompt('');
+  }, []);
+
+  const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!editMode.sessionId || !editMode.meta || editMode.editLoading) return;
+
+    const canvas = editCanvasRef.current;
+    if (!canvas) return;
+
+    const img = canvas.querySelector('img');
+    if (!img) return;
+
+    // 获取图片在容器中的实际显示尺寸和位置
+    const imgRect = img.getBoundingClientRect();
+    const clickX = e.clientX - imgRect.left;
+    const clickY = e.clientY - imgRect.top;
+
+    // 检查是否点击在图片范围内
+    if (clickX < 0 || clickY < 0 || clickX > imgRect.width || clickY > imgRect.height) {
+      return;
+    }
+
+    // 坐标换算：显示坐标 -> 原图像素坐标
+    const scaleX = editMode.meta.w / imgRect.width;
+    const scaleY = editMode.meta.h / imgRect.height;
+    const x = Math.round(clickX * scaleX);
+    const y = Math.round(clickY * scaleY);
+
+    try {
+      setEditMode((prev) => ({ ...prev, editLoading: true }));
+      const result = await interactivePick(editMode.sessionId, x, y);
+      
+      if (result.layer === 'none') {
+        setEditMode((prev) => ({
+          ...prev,
+          selectedLayer: null,
+          maskDataUrl: null,
+          editLoading: false,
+        }));
+        message.info('点击了背景区域，请点击地毯区域');
+      } else {
+        const maskDataUrl = `data:image/png;base64,${result.mask_png_base64}`;
+        setEditMode((prev) => ({
+          ...prev,
+          selectedLayer: result.layer,
+          maskDataUrl,
+          editLoading: false,
+        }));
+      }
+    } catch (error) {
+      console.error('拾取失败:', error);
+      setEditMode((prev) => ({ ...prev, editLoading: false }));
+      message.error('拾取失败');
+    }
+  }, [editMode.sessionId, editMode.meta, editMode.editLoading]);
+
+  const handleApplyEdit = useCallback(async () => {
+    if (!editMode.sessionId || !editMode.selectedLayer || !editPrompt.trim()) {
+      message.warning('请先选择区域并输入编辑指令');
+      return;
+    }
+
+    try {
+      setEditMode((prev) => ({ ...prev, editLoading: true }));
+      message.loading({ content: '正在应用编辑...', key: 'applyEdit' });
+
+      const result = await interactiveEdit(
+        editMode.sessionId,
+        editMode.selectedLayer,
+        editPrompt.trim()
+      );
+
+      const newImageDataUrl = `data:image/png;base64,${result.result_png_base64}`;
+      setEditMode((prev) => ({
+        ...prev,
+        currentImageDataUrl: newImageDataUrl,
+        maskDataUrl: null,
+        selectedLayer: null,
+        editLoading: false,
+        history: [...prev.history, newImageDataUrl], // 保存到历史记录
+      }));
+      setEditPrompt('');
+      message.success({ content: '编辑已应用', key: 'applyEdit' });
+    } catch (error) {
+      console.error('应用编辑失败:', error);
+      const errorMsg = error instanceof Error ? error.message : '未知错误';
+      setEditMode((prev) => ({ ...prev, editLoading: false }));
+      message.error({ content: `编辑失败: ${errorMsg}`, key: 'applyEdit' });
+    }
+  }, [editMode.sessionId, editMode.selectedLayer, editPrompt]);
+
+  // 撤回到上一步
+  const handleUndo = useCallback(() => {
+    if (editMode.history.length <= 1) {
+      message.info('已经是最初状态');
+      return;
+    }
+    
+    setEditMode((prev) => {
+      const newHistory = prev.history.slice(0, -1);
+      const previousImage = newHistory[newHistory.length - 1];
+      return {
+        ...prev,
+        currentImageDataUrl: previousImage,
+        maskDataUrl: null,
+        selectedLayer: null,
+        history: newHistory,
+      };
+    });
+    message.success('已撤回');
+  }, [editMode.history.length]);
+
+  // 添加当前编辑图片到参考图并跳转到生图界面
+  const handleAddToReference = useCallback(() => {
+    if (!editMode.currentImageDataUrl) return;
+    
+    const uid = `edit_ref_${Date.now()}`;
+    setFileList([{
+      uid,
+      name: 'edited_image.png',
+      status: 'done',
+      url: editMode.currentImageDataUrl,
+    }]);
+    setActiveTab('chat');
+    // 切换后直接定格在底部（无动画）
+    setTimeout(() => scrollToBottom(true), 50);
+    message.success('已加入对话');
+  }, [editMode.currentImageDataUrl, scrollToBottom]);
+
 
   const copyImageToClipboard = useCallback(async (src: string) => {
     if (!src) return;
@@ -621,15 +949,49 @@ const App: React.FC = () => {
       reader.readAsDataURL(fileToUpload);
     } else if (currentMode === 'generate' && referenceImageUrl && (overrideImageUrl || !!fileItem?.url)) {
       const msgType = displayText || paramsSnapshot ? 'mixed' : 'image';
-      addMessage({
-        type: msgType,
-        content: referenceImageUrl,
-        text: displayText || undefined,
-        params: paramsSnapshot,
-        referenceImage: referenceImageUrl,
-        source: 'user',
-        isUser: true,
-      });
+      // 如果是 blob: URL，需要转换为 dataUrl 以持久化存储
+      if (referenceImageUrl.startsWith('blob:')) {
+        fetch(referenceImageUrl)
+          .then((res) => res.blob())
+          .then((blob) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const dataUrl = reader.result as string;
+              addMessage({
+                type: msgType,
+                content: dataUrl,
+                text: displayText || undefined,
+                params: paramsSnapshot,
+                referenceImage: dataUrl,
+                source: 'user',
+                isUser: true,
+              });
+            };
+            reader.readAsDataURL(blob);
+          })
+          .catch(() => {
+            // 转换失败时仍使用原 URL
+            addMessage({
+              type: msgType,
+              content: referenceImageUrl,
+              text: displayText || undefined,
+              params: paramsSnapshot,
+              referenceImage: referenceImageUrl,
+              source: 'user',
+              isUser: true,
+            });
+          });
+      } else {
+        addMessage({
+          type: msgType,
+          content: referenceImageUrl,
+          text: displayText || undefined,
+          params: paramsSnapshot,
+          referenceImage: referenceImageUrl,
+          source: 'user',
+          isUser: true,
+        });
+      }
     } else if (displayText || paramsSnapshot) {
       addMessage({ type: 'text', content: displayText || '', params: paramsSnapshot, isUser: true });
     }
@@ -810,13 +1172,317 @@ const App: React.FC = () => {
 
   // ==================== 渲染 ====================
 
+  // 是否显示编辑态视图 - 仅由 activeTab 决定，editMode 状态独立保持
+  const showEditView = activeTab === 'edit';
+  
+  // 编辑态视图
+  if (showEditView) {
+    return (
+      <div style={styles.container}>
+        {/* 顶部栏 - 带 Tab 切换 */}
+        <div style={styles.header}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <Typography.Title level={4} style={{ ...styles.title, marginRight: '8px' }}>
+              <span style={{ fontSize: '24px' }}>🎨</span> Picture AI
+            </Typography.Title>
+            {/* Tab 切换按钮 */}
+            <div style={editStyles.tabContainer}>
+              <Button
+                type="text"
+                size="small"
+                onClick={() => {
+                  setActiveTab('chat');
+                  // 切换后直接定格在底部（无动画）
+                  setTimeout(() => scrollToBottom(true), 50);
+                }}
+                style={editStyles.tabInactive}
+              >
+                生图 / 搜图
+              </Button>
+              <Button
+                type="primary"
+                size="small"
+                style={editStyles.tabActive}
+              >
+                分层编辑
+              </Button>
+            </div>
+          </div>
+          {editMode.active && (
+            <Button type="text" onClick={exitEditMode} style={{ color: '#666' }}>
+              退出编辑
+            </Button>
+          )}
+        </div>
+
+        {/* 编辑态主体 */}
+        <div style={editStyles.editContainer}>
+          {/* 画布区域 */}
+          <div
+            ref={editCanvasRef}
+            style={editStyles.canvasArea}
+            onClick={editMode.currentImageDataUrl ? handleCanvasClick : undefined}
+          >
+            {editMode.currentImageDataUrl ? (
+              <>
+                <div style={editStyles.imageWrapper}>
+                  {/* 图片右上角关闭按钮 */}
+                  <div
+                    style={editStyles.imageCloseBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditMode(initialEditModeState);
+                    }}
+                    title="移除图片"
+                  >
+                    ✕
+                  </div>
+                  <img
+                    src={editMode.currentImageDataUrl}
+                    alt="编辑图片"
+                    style={editStyles.mainImage}
+                    draggable={false}
+                  />
+                  {/* Mask 叠加层 */}
+                  {editMode.maskDataUrl && (
+                    <img
+                      src={editMode.maskDataUrl}
+                      alt="选中区域"
+                      style={editStyles.maskOverlay}
+                      draggable={false}
+                    />
+                  )}
+                  {editMode.editLoading && (
+                    <div style={editStyles.loadingOverlay}>
+                      <div className="loading-dots">处理中...</div>
+                    </div>
+                  )}
+                </div>
+                <div style={editStyles.canvasHint}>
+                  点击图片选择要编辑的区域
+                </div>
+              </>
+            ) : (
+              /* 无图片时显示上传区域 */
+              <Upload.Dragger
+                accept="image/*"
+                showUploadList={false}
+                beforeUpload={(file) => {
+                  void enterEditMode(file);
+                  return false;
+                }}
+                style={editStyles.uploadDragger}
+              >
+                <div style={editStyles.uploadContent}>
+                  <PictureOutlined style={{ fontSize: '48px', color: '#999', marginBottom: '16px' }} />
+                  <div style={{ fontSize: '16px', color: '#333', marginBottom: '8px' }}>
+                    点击或拖拽上传图片
+                  </div>
+                  <div style={{ fontSize: '14px', color: '#999' }}>
+                    支持 PNG、JPG、WEBP 等格式
+                  </div>
+                </div>
+              </Upload.Dragger>
+            )}
+          </div>
+
+          {/* 右侧编辑面板 */}
+          <div style={editStyles.editPanel}>
+            <div style={editStyles.panelSection}>
+              <div style={editStyles.panelLabel}>当前选中</div>
+              <div style={editStyles.layerDisplay}>
+                {editMode.selectedLayer ? (
+                  <span style={editStyles.layerTagWithClose}>
+                    <span>
+                      {editMode.selectedLayer === 'field' && '地场 (Field)'}
+                      {editMode.selectedLayer === 'border' && '边框 (Border)'}
+                      {editMode.selectedLayer === 'rug' && '整毯 (Rug)'}
+                    </span>
+                    <span
+                      style={editStyles.layerCloseBtn}
+                      onClick={() => setEditMode((prev) => ({ ...prev, selectedLayer: null, maskDataUrl: null }))}
+                      title="取消选中"
+                    >
+                      ✕
+                    </span>
+                  </span>
+                ) : (
+                  <span style={{ color: '#999' }}>未选中，请点击图片</span>
+                )}
+              </div>
+            </div>
+
+            <div style={editStyles.panelSection}>
+              <div style={editStyles.panelLabel}>编辑指令</div>
+              <Input.TextArea
+                placeholder="例如：改成深红色、变亮、提高对比度"
+                value={editPrompt}
+                onChange={(e) => setEditPrompt(e.target.value)}
+                disabled={!editMode.selectedLayer || editMode.editLoading}
+                autoSize={{ minRows: 2, maxRows: 4 }}
+                style={editStyles.promptInput}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleApplyEdit();
+                  }
+                }}
+              />
+            </div>
+
+            <Button
+              type="primary"
+              size="large"
+              block
+              onClick={() => void handleApplyEdit()}
+              disabled={!editMode.selectedLayer || !editPrompt.trim() || editMode.editLoading}
+              loading={editMode.editLoading}
+              style={editStyles.applyButton}
+            >
+              应用编辑
+            </Button>
+
+            <div style={editStyles.panelSection}>
+              <div style={editStyles.panelLabel}>快捷指令</div>
+              <div style={editStyles.quickActions}>
+                {['深红色', '藏蓝色', '米白色', '变亮', '变暗', '提高对比度'].map((cmd) => (
+                  <Button
+                    key={cmd}
+                    size="small"
+                    onClick={() => setEditPrompt(`改成${cmd}`)}
+                    disabled={!editMode.selectedLayer || editMode.editLoading}
+                    style={editStyles.quickButton}
+                  >
+                    {cmd}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            {/* 操作按钮区 */}
+            <div style={editStyles.panelSection}>
+              <div style={editStyles.panelLabel}>图片操作</div>
+              <div style={editStyles.actionButtons}>
+                <Tooltip title="撤回上一步编辑">
+                  <Button
+                    icon={<span style={{ fontSize: '14px' }}>↩️</span>}
+                    onClick={handleUndo}
+                    disabled={editMode.history.length <= 1 || editMode.editLoading}
+                  >
+                    撤回
+                  </Button>
+                </Tooltip>
+                <Tooltip title="将图片加入对话作为参考图">
+                  <Button
+                    icon={<LinkOutlined />}
+                    onClick={handleAddToReference}
+                    disabled={!editMode.currentImageDataUrl}
+                  >
+                    引用：加入对话
+                  </Button>
+                </Tooltip>
+                <Tooltip title="功能开发中">
+                  <Button
+                    icon={<span style={{ fontSize: '14px' }}>📚</span>}
+                    disabled
+                    style={{ cursor: 'not-allowed' }}
+                  >
+                    添加到知识库
+                  </Button>
+                </Tooltip>
+                <Tooltip title="下载编辑后的图片">
+                  <Button
+                    icon={<DownloadOutlined />}
+                    onClick={() => editMode.currentImageDataUrl && openDownloadDialog(editMode.currentImageDataUrl, 'edited_image.png')}
+                    disabled={!editMode.currentImageDataUrl}
+                  >
+                    下载
+                  </Button>
+                </Tooltip>
+              </div>
+            </div>
+
+            {editMode.meta && (
+              <div style={editStyles.metaInfo}>
+                <div>尺寸: {editMode.meta.w} × {editMode.meta.h}</div>
+                <div>分割模式: {editMode.meta.seg_mode}</div>
+                <div>编辑历史: {editMode.history.length} 步</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 下载弹窗 - 在分层编辑页面显示 */}
+        <Modal
+          open={downloadDialog.open}
+          onCancel={closeDownloadDialog}
+          title="下载图片"
+          centered
+          footer={null}
+        >
+          <p>选择下载格式后点击下载。</p>
+          <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
+            <Button onClick={closeDownloadDialog}>取消</Button>
+            <Select
+              value={downloadFormat}
+              onChange={setDownloadFormat}
+              style={{ width: 140 }}
+              options={[
+                { value: 'png', label: 'png（默认）' },
+                { value: 'jpg', label: 'jpg' },
+                { value: 'webp', label: 'webp' },
+                { value: 'bmp', label: 'bmp' },
+                { value: 'tiff', label: 'tiff' },
+              ]}
+            />
+            <Button type="primary" onClick={handleConfirmDownload}>
+              下载
+            </Button>
+          </div>
+        </Modal>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.container}>
-      {/* 顶部栏 */}
+      {/* 进入编辑模式的全局 Loading 遮罩 */}
+      {editModeLoading && (
+        <div style={editStyles.globalLoadingOverlay}>
+          <div style={editStyles.globalLoadingContent}>
+            <div className="loading-dots" style={{ fontSize: '18px', marginBottom: '8px' }}>
+              正在分析图片...
+            </div>
+            <div style={{ color: '#666', fontSize: '14px' }}>请稍候，正在进行图像分割</div>
+          </div>
+        </div>
+      )}
+
+      {/* 顶部栏 - 带 Tab 切换 */}
       <div style={styles.header}>
-        <Typography.Title level={4} style={styles.title}>
-          <span style={{ fontSize: '24px' }}>🎨</span> Picture AI
-        </Typography.Title>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <Typography.Title level={4} style={{ ...styles.title, marginRight: '8px' }}>
+            <span style={{ fontSize: '24px' }}>🎨</span> Picture AI
+          </Typography.Title>
+          {/* Tab 切换按钮 */}
+          <div style={editStyles.tabContainer}>
+            <Button
+              type="primary"
+              size="small"
+              style={editStyles.tabActive}
+            >
+              生图 / 搜图
+            </Button>
+            <Button
+              type="text"
+              size="small"
+              onClick={() => setActiveTab('edit')}
+              style={editStyles.tabInactive}
+            >
+              分层编辑
+            </Button>
+          </div>
+        </div>
         <div />
       </div>
 
@@ -833,6 +1499,7 @@ const App: React.FC = () => {
               onRegenerate={(msg) => void handleRegenerate(msg)}
               onDownload={openDownloadDialog}
               onImageLoad={scrollToBottom}
+              onEditLayer={(url) => void enterEditMode(url)}
             />
           )}
           {loading && (
@@ -1393,6 +2060,7 @@ const MessageList: React.FC<{
   onRegenerate: (message: Message) => void;
   onDownload: (src: string) => void;
   onImageLoad: () => void;
+  onEditLayer?: (imageUrl: string) => void;
 }> = ({
   messages,
   onPreview,
@@ -1400,6 +2068,7 @@ const MessageList: React.FC<{
   onRegenerate,
   onDownload,
   onImageLoad,
+  onEditLayer,
 }) => (
   <List
     dataSource={messages}
@@ -1419,6 +2088,7 @@ const MessageList: React.FC<{
           onRegenerate={onRegenerate}
           onDownload={onDownload}
           onImageLoad={onImageLoad}
+          onEditLayer={onEditLayer}
           selectedMaskDataUrl={undefined}
         />
       </List.Item>
@@ -1433,8 +2103,9 @@ const MessageBubble: React.FC<{
   onRegenerate: (message: Message) => void;
   onDownload: (src: string) => void;
   onImageLoad: () => void;
+  onEditLayer?: (imageUrl: string) => void;
   selectedMaskDataUrl?: string;
-}> = ({ message, onPreview, onUseAsReference, onRegenerate, onDownload, onImageLoad }) => {
+}> = ({ message, onPreview, onUseAsReference, onRegenerate, onDownload, onImageLoad, onEditLayer }) => {
   const { type, content, text, isUser, source, params } = message;
   const [hovered, setHovered] = useState(false);
   const resolvedSource: 'user' | 'search' | 'generate' = source || (isUser ? 'user' : 'generate');
@@ -1562,6 +2233,16 @@ const MessageBubble: React.FC<{
                   onClick={() => onDownload(content)}
                 />
               </Tooltip>
+              {onEditLayer && !isUser && (
+                <Tooltip title="分层编辑">
+                  <Button
+                    shape="circle"
+                    icon={<span style={{ fontSize: '14px' }}>✂️</span>}
+                    style={styles.imageActionButton}
+                    onClick={() => onEditLayer(content)}
+                  />
+                </Tooltip>
+              )}
             </div>
           </div>
           {type === 'mixed' && (text || (isUser && hasBubbleParams)) && (
@@ -1643,6 +2324,229 @@ const FilePreview: React.FC<{
 };
 
 // ==================== 样式 ====================
+
+// 编辑态样式
+const editStyles: { [key: string]: React.CSSProperties } = {
+  editContainer: {
+    flex: 1,
+    display: 'flex',
+    gap: '20px',
+    padding: '20px',
+    overflow: 'hidden',
+  },
+  canvasArea: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#f0f0f0',
+    borderRadius: '12px',
+    position: 'relative',
+    cursor: 'crosshair',
+    overflow: 'hidden',
+  },
+  imageWrapper: {
+    position: 'relative',
+    maxWidth: '100%',
+    maxHeight: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mainImage: {
+    maxWidth: '100%',
+    maxHeight: 'calc(100vh - 200px)',
+    objectFit: 'contain',
+    borderRadius: '8px',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+  },
+  maskOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    objectFit: 'contain',
+    pointerEvents: 'none',
+    opacity: 0.5,
+    mixBlendMode: 'multiply',
+    filter: 'hue-rotate(180deg) saturate(3)',
+  },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(255,255,255,0.8)',
+    borderRadius: '8px',
+  },
+  canvasHint: {
+    position: 'absolute',
+    bottom: '12px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    padding: '6px 16px',
+    background: 'rgba(0,0,0,0.6)',
+    color: '#fff',
+    borderRadius: '20px',
+    fontSize: '13px',
+  },
+  editPanel: {
+    width: '320px',
+    background: '#fff',
+    borderRadius: '12px',
+    padding: '20px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+    boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
+  },
+  panelSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  panelLabel: {
+    fontSize: '14px',
+    fontWeight: 600,
+    color: '#333',
+  },
+  layerDisplay: {
+    padding: '12px',
+    background: '#f5f5f5',
+    borderRadius: '8px',
+    minHeight: '20px',
+  },
+  layerTag: {
+    display: 'inline-block',
+    padding: '4px 12px',
+    background: '#1677ff',
+    color: '#fff',
+    borderRadius: '4px',
+    fontSize: '14px',
+  },
+  layerTagWithClose: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '4px 8px 4px 12px',
+    background: '#1677ff',
+    color: '#fff',
+    borderRadius: '4px',
+    fontSize: '14px',
+  },
+  layerCloseBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '18px',
+    height: '18px',
+    borderRadius: '50%',
+    background: 'rgba(255,255,255,0.2)',
+    cursor: 'pointer',
+    fontSize: '12px',
+    transition: 'background 0.2s',
+  },
+  promptInput: {
+    borderRadius: '8px',
+  },
+  applyButton: {
+    borderRadius: '8px',
+    height: '44px',
+  },
+  quickActions: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  quickButton: {
+    borderRadius: '6px',
+  },
+  metaInfo: {
+    marginTop: 'auto',
+    padding: '12px',
+    background: '#f9f9f9',
+    borderRadius: '8px',
+    fontSize: '12px',
+    color: '#666',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  globalLoadingOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: 'rgba(255, 255, 255, 0.9)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  globalLoadingContent: {
+    textAlign: 'center',
+    padding: '40px',
+    background: '#fff',
+    borderRadius: '16px',
+    boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+  },
+  tabContainer: {
+    display: 'flex',
+    gap: '4px',
+    background: '#f0f0f0',
+    padding: '4px',
+    borderRadius: '8px',
+  },
+  tabActive: {
+    borderRadius: '6px',
+  },
+  tabInactive: {
+    borderRadius: '6px',
+    color: '#666',
+  },
+  actionButtons: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  imageCloseBtn: {
+    position: 'absolute',
+    top: '-8px',
+    right: '-8px',
+    width: '24px',
+    height: '24px',
+    borderRadius: '50%',
+    background: 'rgba(0,0,0,0.6)',
+    color: '#fff',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    fontSize: '12px',
+    zIndex: 10,
+    transition: 'background 0.2s',
+  },
+  uploadDragger: {
+    width: '100%',
+    height: '100%',
+    border: 'none',
+    background: 'transparent',
+  },
+  uploadContent: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '40px',
+  },
+};
 
 const styles: { [key: string]: React.CSSProperties } = {
   container: {
