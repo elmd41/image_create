@@ -15,7 +15,7 @@ from io import BytesIO
 
 import httpx
 import numpy as np
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from PIL import Image
 from pydantic import BaseModel
 
@@ -23,6 +23,7 @@ from app.service.composition.compositor import composite
 from app.service.editing.layer_editor import edit_layer
 from app.service.editing.prompt_translator import translate_prompt_to_params
 from app.service.segmentation.flat_segmenter import segment_from_pil
+from app.service.segmentation.grabcut_segmenter import segment_with_grabcut
 from app.service.segmentation.rule_segmenter import segment_rug_layers
 from app.service.selection.layer_picker import pick_layer
 from app.service.session.session_store import (
@@ -72,6 +73,9 @@ async def interactive_ping() -> dict:
 @router.post("/interactive/upload", response_model=UploadResponse)
 async def interactive_upload(
     file: UploadFile = File(..., description="Image file (PNG/JPEG)"),
+    alpha_val: float = Query(0.22, ge=0.05, le=0.5, description="边框/内芯分割阈值，值越大边框越宽"),
+    white_threshold: int = Query(245, ge=200, le=255, description="白底检测阈值，值越低越激进"),
+    layer_count: int = Query(2, ge=1, le=6, description="分层数量，2=边框+内芯，N=多层"),
 ) -> UploadResponse:
     """Upload image, auto-segment into layers, create editing session.
     
@@ -79,9 +83,14 @@ async def interactive_upload(
     1. Try flat_segmenter (optimized for flat designs with alpha/white background)
     2. Fallback to rule_segmenter if flat fails
     
+    Args:
+        file: 图片文件 (PNG/JPEG)
+        alpha_val: 边框厚度控制，0.05-0.5，默认 0.22
+        white_threshold: 背景检测敏感度，200-255，默认 245
+    
     Returns session_id and metadata.
     """
-    logger.info("【interactive/upload】filename=%s", file.filename)
+    logger.info("【interactive/upload】filename=%s, alpha_val=%.2f, white_threshold=%d", file.filename, alpha_val, white_threshold)
     
     # Read and decode image
     try:
@@ -96,12 +105,12 @@ async def interactive_upload(
     
     # Try flat segmenter first
     seg_mode = "flat"
-    alpha_val = 0.22
     masks: dict[str, np.ndarray] | None = None
     seg_error: str | None = None
     
     try:
-        result = segment_from_pil(pil_img, alpha_val=alpha_val)
+        result = segment_from_pil(pil_img, alpha_val=alpha_val, white_threshold=white_threshold, layer_count=layer_count)
+
         masks = {
             "rug_mask": result["rug_mask"],
             "border_mask": result["border_mask"],
@@ -131,11 +140,35 @@ async def interactive_upload(
             seg_mode = "rule"
             logger.info("【interactive/upload】rule_segmenter success")
         except Exception as e2:
-            logger.error("Both segmenters failed: flat=%s, rule=%s", seg_error, e2)
-            raise HTTPException(
-                status_code=400,
-                detail=f"分割失败: flat={seg_error}, rule={e2}",
-            ) from e2
+            logger.warning("rule_segmenter failed: %s, trying grabcut", e2)
+            
+            # Fallback to GrabCut
+            try:
+                # GrabCut need BGR image
+                rgb = np.asarray(pil_img.convert("RGB"), dtype=np.uint8)
+                bgr = rgb[:, :, ::-1].copy()
+                
+                # 使用中心区域初始化
+                h, w = bgr.shape[:2]
+                rect = (int(w*0.1), int(h*0.1), int(w*0.8), int(h*0.8))
+                
+                fg_mask = segment_with_grabcut(bgr, rect=rect, iterations=5)
+                
+                # 构造最简单的 border/field 结构 (假设全为 field)
+                masks = {
+                    "rug_mask": fg_mask,
+                    "field_mask": fg_mask,
+                    "border_mask": np.zeros_like(fg_mask),
+                    "background_mask": (fg_mask == 0).astype(np.uint8) * 255
+                }
+                seg_mode = "grabcut"
+                logger.info("【interactive/upload】grabcut success")
+            except Exception as e3:
+                logger.error("All segmenters failed: flat=%s, rule=%s, grabcut=%s", seg_error, e2, e3)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"分割失败: {seg_error}",
+                ) from e3
     
     # Convert image to BGR ndarray for session storage
     rgb = np.asarray(pil_img.convert("RGB"), dtype=np.uint8)

@@ -90,12 +90,22 @@ export interface InteractiveEditResponse {
  */
 export const interactiveUpload = async (
   file: File,
+  options?: {
+    alpha_val?: number;
+    white_threshold?: number;
+    layer_count?: number;
+  },
   signal?: AbortSignal
 ): Promise<InteractiveUploadResponse> => {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE_URL}/api/interactive/upload`, {
+  const queryParams = new URLSearchParams();
+  if (options?.alpha_val !== undefined) queryParams.append('alpha_val', options.alpha_val.toString());
+  if (options?.white_threshold !== undefined) queryParams.append('white_threshold', options.white_threshold.toString());
+  if (options?.layer_count !== undefined) queryParams.append('layer_count', options.layer_count.toString());
+
+  const response = await fetch(`${API_BASE_URL}/api/interactive/upload?${queryParams.toString()}`, {
     method: 'POST',
     body: formData,
     signal,

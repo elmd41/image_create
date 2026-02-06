@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.api import conversations, generate, interactive, search
+from app.api import color, conversations, crop, generate, interactive, search, download
 from app.config.settings import settings
 
 
@@ -178,6 +178,9 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(generate.router, prefix="/api", tags=["生成"])
     app.include_router(conversations.router, prefix="/api", tags=["会话"])
     app.include_router(interactive.router, prefix="/api", tags=["分层编辑"])
+    app.include_router(crop.router, prefix="/api", tags=["生产稿裁切"])
+    app.include_router(color.router, prefix="/api", tags=["颜色处理"])
+    app.include_router(download.router, prefix="/api", tags=["下载服务"])
 
 
     @app.get("/", tags=["系统"])

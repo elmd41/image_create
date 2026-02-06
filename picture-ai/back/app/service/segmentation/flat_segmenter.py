@@ -109,6 +109,8 @@ def segment_flat_design(
     alpha: np.ndarray | None = None,
     alpha_val: float = 0.22,
     white_threshold: int = 250,
+    layer_count: int = 2,
+    layer_ratios: list[float] | None = None,
 ) -> dict[str, np.ndarray]:
     """Segment a flat carpet design into layers.
     
@@ -179,52 +181,86 @@ def segment_flat_design(
     
     logger.info("flat_segmenter: rug_mask covers %.1f%% of image", fg_ratio * 100)
     
-    # Step 4: Distance Transform for border/field separation
+    # Step 4: Distance Transform for multi-layer separation
     dist = _distance_transform(rug_mask)
     max_dist = float(dist.max())
-    
-    if max_dist < 2:
-        # Very thin rug, treat all as field
-        border_mask = np.zeros((h, w), dtype=np.uint8)
-        field_mask = rug_mask.copy()
-    else:
-        threshold = alpha_val * max_dist
-        # Border = pixels with distance <= threshold (outer ring)
-        border_mask = ((dist > 0) & (dist <= threshold)).astype(np.uint8) * 255
-        # Field = pixels with distance > threshold (inner area)
-        field_mask = (dist > threshold).astype(np.uint8) * 255
-    
-    # Background = not rug
     background_mask = (rug_mask == 0).astype(np.uint8) * 255
     
-    logger.info(
-        "flat_segmenter: border=%.1f%%, field=%.1f%%, bg=%.1f%%",
-        100 * (border_mask > 0).sum() / total_pixels,
-        100 * (field_mask > 0).sum() / total_pixels,
-        100 * (background_mask > 0).sum() / total_pixels,
-    )
-    
-    return {
+    masks = {
         "rug_mask": _ensure_u8_mask(rug_mask),
-        "border_mask": _ensure_u8_mask(border_mask),
-        "field_mask": _ensure_u8_mask(field_mask),
         "background_mask": _ensure_u8_mask(background_mask),
-        "_meta": {
-            "seg_mode": seg_mode,
-            "alpha_val": alpha_val,
-            "max_dist": max_dist,
-            "fg_ratio": fg_ratio,
-        },
     }
+
+    if max_dist < 2:
+        # Very thin rug, treat all as single layer
+        masks["field_mask"] = _ensure_u8_mask(rug_mask)
+        masks["border_mask"] = np.zeros((h, w), dtype=np.uint8)
+        masks["layer_0_mask"] = _ensure_u8_mask(rug_mask)
+        current_ratios = [1.0]
+    else:
+        # Determine layer ratios
+        if layer_ratios is None:
+            if layer_count <= 2:
+                # Default 2-layer: uses alpha_val for backward compatibility
+                current_ratios = [alpha_val, 1.0]
+            else:
+                # Evenly distributed N layers
+                current_ratios = [i / layer_count for i in range(1, layer_count + 1)]
+        else:
+            current_ratios = sorted(layer_ratios)
+            if current_ratios[-1] != 1.0:
+                current_ratios.append(1.0)
+                
+        prev_threshold = 0.0
+        
+        for i, ratio in enumerate(current_ratios):
+            threshold = ratio * max_dist
+            # Layer is between prev and current threshold
+            layer_mask = ((dist > prev_threshold) & (dist <= threshold)).astype(np.uint8) * 255
+            
+            # Store as indexed layer
+            masks[f"layer_{i}_mask"] = layer_mask
+            
+            # Map to semantic names for backward compatibility (2 layers only)
+            if len(current_ratios) == 2:
+                if i == 0: masks["border_mask"] = layer_mask
+                if i == 1: masks["field_mask"] = layer_mask
+            
+            prev_threshold = threshold
+    
+    # Log layer info
+    layer_info = ", ".join([f"L{i}={100*(masks.get(f'layer_{i}_mask', np.zeros(1))>0).sum()/total_pixels:.1f}%" for i in range(len(current_ratios))])
+    logger.info("flat_segmenter: %d layers - %s, bg=%.1f%%", len(current_ratios), layer_info, 100*(background_mask>0).sum()/total_pixels)
+
+    masks["_meta"] = {
+        "seg_mode": seg_mode,
+        "alpha_val": alpha_val,
+        "max_dist": max_dist,
+        "fg_ratio": fg_ratio,
+        "layer_count": len(current_ratios),
+        "layer_ratios": current_ratios,
+    }
+    
+    return masks
 
 
 def segment_from_pil(
     pil_image: Image.Image,
     alpha_val: float = 0.22,
+    white_threshold: int = 245,
+    layer_count: int = 2,
+    layer_ratios: list[float] | None = None,
 ) -> dict[str, np.ndarray]:
     """Convenience wrapper for PIL Image input.
     
     Handles RGBA/RGB/LA/L modes automatically.
+    
+    Args:
+        pil_image: PIL Image object
+        alpha_val: Distance transform threshold ratio for border/field split (0.05-0.5)
+        white_threshold: Grayscale threshold for white background detection (200-255)
+        layer_count: Number of layers to generate (2=border+field, N=multi-layer)
+        layer_ratios: Custom layer distance ratios, overrides layer_count
     """
     if pil_image is None:
         raise ValueError("pil_image is None")
@@ -242,4 +278,12 @@ def segment_from_pil(
         bgr = rgb[:, :, ::-1].copy()
         alpha = None
     
-    return segment_flat_design(bgr, alpha=alpha, alpha_val=alpha_val)
+    return segment_flat_design(
+        bgr, 
+        alpha=alpha, 
+        alpha_val=alpha_val, 
+        white_threshold=white_threshold,
+        layer_count=layer_count,
+        layer_ratios=layer_ratios
+    )
+

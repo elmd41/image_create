@@ -3,6 +3,14 @@
 *.pyc
 *.pyo
 
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Node.js
+node_modules/
+
 # Env & logs
 .env
 .env.*
