@@ -32,6 +32,7 @@ from app.config.settings import settings
 from app.service.segmentation.rule_segmenter import segment_rug_layers
 from app.service.volcengine_service import volcengine_service
 from app.service.vision_service import VisionService, vision_service
+from app.utils.color_matcher import describe_color, parse_color
 
 
 logger = logging.getLogger(__name__)
@@ -496,105 +497,16 @@ def _build_enhanced_prompt(
         return re.search(r"\d+\s*:\s*\d+", t) is not None
 
     def _format_color_for_prompt(raw: str) -> str:
-        """将颜色值转换为自然语言描述，避免十六进制代码被打印到图片上。"""
+        """使用 CIE Lab 颜色匹配，将颜色值转换为专业自然语言描述。"""
         c = (raw or "").strip()
         if not c:
             return ""
-        
-        # 如果是十六进制颜色，转换为近似的颜色名称
-        if c.startswith("#"):
-            c_hex = c[1:]
-        else:
-            c_hex = c
-        
-        if re.fullmatch(r"[0-9a-fA-F]{6}", c_hex):
-            r = int(c_hex[0:2], 16)
-            g = int(c_hex[2:4], 16)
-            b = int(c_hex[4:6], 16)
-            # 转换为近似颜色名称
-            color_name = _hex_to_color_name(r, g, b)
-            return f"主体颜色为{color_name}"
-        
-        # 如果已经是颜色名称，直接返回
-        return f"主体颜色为{c}"
+        try:
+            return describe_color(c)
+        except ValueError:
+            # 已经是颜色名称，直接返回
+            return f"主体颜色为{c}"
 
-    def _hex_to_color_name(r: int, g: int, b: int) -> str:
-        """将 RGB 值转换为更精细的中文颜色名称，尽量接近用户选择的颜色。"""
-        # 预定义的颜色表（颜色名, R, G, B）
-        color_table = [
-            # 红色系
-            ("深红色", 139, 0, 0),
-            ("酒红色", 128, 0, 32),
-            ("正红色", 255, 0, 0),
-            ("朱红色", 255, 69, 0),
-            ("珊瑚红", 255, 127, 80),
-            ("粉红色", 255, 182, 193),
-            ("玫瑰红", 255, 0, 127),
-            # 橙色系
-            ("深橙色", 255, 140, 0),
-            ("橙色", 255, 165, 0),
-            ("暖橙色", 255, 155, 100),
-            ("杏色", 255, 200, 160),
-            ("桃色", 255, 218, 185),
-            # 黄色系
-            ("金黄色", 255, 215, 0),
-            ("明黄色", 255, 255, 0),
-            ("柠檬黄", 255, 247, 0),
-            ("淡黄色", 255, 255, 224),
-            ("米黄色", 245, 222, 179),
-            ("土黄色", 184, 134, 11),
-            # 绿色系
-            ("深绿色", 0, 100, 0),
-            ("森林绿", 34, 139, 34),
-            ("翠绿色", 0, 128, 0),
-            ("草绿色", 124, 252, 0),
-            ("浅绿色", 144, 238, 144),
-            ("薄荷绿", 152, 255, 152),
-            ("青绿色", 0, 128, 128),
-            ("橄榄绿", 128, 128, 0),
-            # 蓝色系
-            ("深蓝色", 0, 0, 139),
-            ("海军蓝", 0, 0, 128),
-            ("宝蓝色", 65, 105, 225),
-            ("天蓝色", 135, 206, 235),
-            ("湖蓝色", 30, 144, 255),
-            ("浅蓝色", 173, 216, 230),
-            ("青色", 0, 255, 255),
-            # 紫色系
-            ("深紫色", 75, 0, 130),
-            ("紫色", 128, 0, 128),
-            ("紫罗兰", 138, 43, 226),
-            ("淡紫色", 216, 191, 216),
-            ("薰衣草紫", 230, 230, 250),
-            ("品红色", 255, 0, 255),
-            # 棕色系
-            ("深棕色", 101, 67, 33),
-            ("棕色", 139, 69, 19),
-            ("咖啡色", 111, 78, 55),
-            ("巧克力色", 210, 105, 30),
-            ("驼色", 193, 154, 107),
-            ("米色", 245, 245, 220),
-            # 灰色系
-            ("黑色", 0, 0, 0),
-            ("深灰色", 64, 64, 64),
-            ("灰色", 128, 128, 128),
-            ("浅灰色", 192, 192, 192),
-            ("银色", 192, 192, 192),
-            ("白色", 255, 255, 255),
-            ("象牙白", 255, 255, 240),
-        ]
-        
-        # 找到最接近的颜色
-        min_dist = float("inf")
-        best_name = "彩色"
-        for name, cr, cg, cb in color_table:
-            dist = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
-            if dist < min_dist:
-                min_dist = dist
-                best_name = name
-        
-        return best_name
-    
     # 添加风格描述（只使用参数本身，不扩写）
     if style:
         parts.append(str(style).strip())

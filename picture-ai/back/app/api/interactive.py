@@ -25,6 +25,7 @@ from app.service.editing.prompt_translator import translate_prompt_to_params
 from app.service.segmentation.flat_segmenter import segment_from_pil
 from app.service.segmentation.grabcut_segmenter import segment_with_grabcut
 from app.service.segmentation.rule_segmenter import segment_rug_layers
+from app.service.segmentation.sam_segmenter import get_sam_segmenter, sam_is_available
 from app.service.selection.layer_picker import pick_layer
 from app.service.session.session_store import (
     EditSession,
@@ -80,8 +81,10 @@ async def interactive_upload(
     """Upload image, auto-segment into layers, create editing session.
     
     Segmentation strategy:
-    1. Try flat_segmenter (optimized for flat designs with alpha/white background)
-    2. Fallback to rule_segmenter if flat fails
+    1. SAM (首选): 预计算 image embedding，pick 时实时分割
+    2. flat_segmenter (fallback): 距离变换分层
+    3. rule_segmenter (fallback): 角落颜色+形态学
+    4. grabcut (fallback): OpenCV GrabCut
     
     Args:
         file: 图片文件 (PNG/JPEG)
@@ -103,76 +106,78 @@ async def interactive_upload(
     w, h = pil_img.size
     logger.info("【interactive/upload】image size: %dx%d, mode=%s", w, h, pil_img.mode)
     
-    # Try flat segmenter first
-    seg_mode = "flat"
-    masks: dict[str, np.ndarray] | None = None
-    seg_error: str | None = None
-    
-    try:
-        result = segment_from_pil(pil_img, alpha_val=alpha_val, white_threshold=white_threshold, layer_count=layer_count)
+    # Convert to RGB/BGR arrays
+    rgb = np.asarray(pil_img.convert("RGB"), dtype=np.uint8)
+    bgr = rgb[:, :, ::-1].copy()
 
-        masks = {
-            "rug_mask": result["rug_mask"],
-            "border_mask": result["border_mask"],
-            "field_mask": result["field_mask"],
-            "background_mask": result["background_mask"],
-        }
-        meta_info = result.get("_meta", {})
-        seg_mode = meta_info.get("seg_mode", "flat")
-        logger.info("【interactive/upload】flat_segmenter success, mode=%s", seg_mode)
-    except Exception as e:
-        seg_error = str(e)
-        logger.warning("flat_segmenter failed: %s, trying rule_segmenter", e)
-    
-    # Fallback to rule segmenter
-    if masks is None:
+    # ── SAM embedding 预计算 ──
+    sam_embedding = None
+    seg_mode = "legacy"
+
+    if sam_is_available():
         try:
-            # Convert to BGR for rule_segmenter
-            rgb = np.asarray(pil_img.convert("RGB"), dtype=np.uint8)
-            bgr = rgb[:, :, ::-1].copy()
-            result = segment_rug_layers(bgr, alpha=alpha_val)
+            sam = get_sam_segmenter()
+            sam_embedding = sam.compute_embedding(rgb.copy())
+            seg_mode = "sam"
+            logger.info("【interactive/upload】SAM embedding 计算成功")
+        except Exception as e:
+            logger.warning("【interactive/upload】SAM embedding 失败，降级到规则分割: %s", e)
+            sam_embedding = None
+
+    # ── 背景检测（SAM 模式也需要，用于判断点击是否在背景上）──
+    background_mask = np.zeros((h, w), dtype=np.uint8)
+    masks: dict[str, np.ndarray] = {}
+
+    if seg_mode == "sam":
+        # SAM 模式：只需要简单的背景 mask，不预计算 border/field
+        try:
+            result = segment_from_pil(pil_img, alpha_val=alpha_val, white_threshold=white_threshold, layer_count=layer_count)
+            background_mask = result["background_mask"]
+            # 也保留旧 masks 作为 fallback
+            masks = {
+                "background_mask": background_mask,
+                "rug_mask": result.get("rug_mask", np.zeros((h, w), dtype=np.uint8)),
+            }
+        except Exception:
+            # 简单 fallback：假设全部是前景
+            background_mask = np.zeros((h, w), dtype=np.uint8)
+            masks = {"background_mask": background_mask}
+    else:
+        # ── Legacy 分割（SAM 不可用时）──
+        seg_error: str | None = None
+        try:
+            result = segment_from_pil(pil_img, alpha_val=alpha_val, white_threshold=white_threshold, layer_count=layer_count)
             masks = {
                 "rug_mask": result["rug_mask"],
                 "border_mask": result["border_mask"],
                 "field_mask": result["field_mask"],
                 "background_mask": result["background_mask"],
             }
-            seg_mode = "rule"
-            logger.info("【interactive/upload】rule_segmenter success")
-        except Exception as e2:
-            logger.warning("rule_segmenter failed: %s, trying grabcut", e2)
-            
-            # Fallback to GrabCut
+            seg_mode = result.get("_meta", {}).get("seg_mode", "flat")
+            logger.info("【interactive/upload】flat_segmenter success")
+        except Exception as e:
+            seg_error = str(e)
+            logger.warning("flat_segmenter failed: %s, trying rule_segmenter", e)
+        
+        if not masks:
             try:
-                # GrabCut need BGR image
-                rgb = np.asarray(pil_img.convert("RGB"), dtype=np.uint8)
-                bgr = rgb[:, :, ::-1].copy()
-                
-                # 使用中心区域初始化
-                h, w = bgr.shape[:2]
-                rect = (int(w*0.1), int(h*0.1), int(w*0.8), int(h*0.8))
-                
-                fg_mask = segment_with_grabcut(bgr, rect=rect, iterations=5)
-                
-                # 构造最简单的 border/field 结构 (假设全为 field)
-                masks = {
-                    "rug_mask": fg_mask,
-                    "field_mask": fg_mask,
-                    "border_mask": np.zeros_like(fg_mask),
-                    "background_mask": (fg_mask == 0).astype(np.uint8) * 255
-                }
-                seg_mode = "grabcut"
-                logger.info("【interactive/upload】grabcut success")
-            except Exception as e3:
-                logger.error("All segmenters failed: flat=%s, rule=%s, grabcut=%s", seg_error, e2, e3)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"分割失败: {seg_error}",
-                ) from e3
-    
-    # Convert image to BGR ndarray for session storage
-    rgb = np.asarray(pil_img.convert("RGB"), dtype=np.uint8)
-    bgr = rgb[:, :, ::-1].copy()
+                result = segment_rug_layers(bgr, alpha=alpha_val)
+                masks = {k: result[k] for k in ("rug_mask", "border_mask", "field_mask", "background_mask")}
+                seg_mode = "rule"
+            except Exception as e2:
+                logger.warning("rule_segmenter failed: %s, trying grabcut", e2)
+                try:
+                    rect = (int(w*0.1), int(h*0.1), int(w*0.8), int(h*0.8))
+                    fg_mask = segment_with_grabcut(bgr, rect=rect, iterations=5)
+                    masks = {
+                        "rug_mask": fg_mask, "field_mask": fg_mask,
+                        "border_mask": np.zeros_like(fg_mask),
+                        "background_mask": (fg_mask == 0).astype(np.uint8) * 255,
+                    }
+                    seg_mode = "grabcut"
+                except Exception as e3:
+                    logger.error("All segmenters failed: flat=%s, rule=%s, grabcut=%s", seg_error, e2, e3)
+                    raise HTTPException(status_code=400, detail=f"分割失败: {seg_error}") from e3
     
     # Create session
     meta = {
@@ -187,8 +192,11 @@ async def interactive_upload(
         masks=masks,
         meta=meta,
     )
+    # 存入 SAM 数据
+    session.sam_embedding = sam_embedding
+    session.image_rgb = rgb
     
-    logger.info("【interactive/upload】session created: %s", session.session_id)
+    logger.info("【interactive/upload】session created: %s, mode=%s", session.session_id, seg_mode)
     
     return UploadResponse(
         session_id=session.session_id,
@@ -200,8 +208,8 @@ async def interactive_upload(
 async def interactive_pick(req: PickRequest) -> PickResponse:
     """Pick layer by clicking point (x, y).
     
-    Returns layer name and mask as base64 PNG.
-    Layer priority: field > border > rug > background > none
+    SAM 模式: 实时调用 SAM predict 生成精准 mask
+    Legacy 模式: 查找预计算 mask (field > border > rug > background)
     """
     logger.info("【interactive/pick】session=%s, x=%d, y=%d", req.session_id, req.x, req.y)
     
@@ -218,29 +226,87 @@ async def interactive_pick(req: PickRequest) -> PickResponse:
             detail=f"坐标越界: x={req.x}, y={req.y}, image={w}x{h}",
         )
     
-    # Pick layer
+    empty_mask = np.zeros((h, w), dtype=np.uint8)
+
+    # ── SAM 模式：实时分割 ──
+    if session.sam_embedding is not None:
+        # 先检查是否点击在背景上
+        bg = session.masks.get("background_mask")
+        if bg is not None and int(bg[req.y, req.x]) > 0:
+            logger.info("【interactive/pick】SAM: clicked background, returning none")
+            session.all_sam_masks = None
+            return PickResponse(layer="none", mask_png_base64=mask_to_png_base64(empty_mask))
+
+        try:
+            sam = get_sam_segmenter()
+            results = sam.predict_at_point(req.x, req.y, session.sam_embedding)
+
+            if not results:
+                return PickResponse(layer="none", mask_png_base64=mask_to_png_base64(empty_mask))
+
+            # 面积过小视为无效点击
+            min_area = h * w * 0.003
+            best = results[0]
+            if best.area < min_area:
+                logger.info("【interactive/pick】SAM: mask area too small (%d < %d)", best.area, int(min_area))
+                return PickResponse(layer="none", mask_png_base64=mask_to_png_base64(empty_mask))
+
+            # 存入 session 供 edit 和 switch-mask 使用
+            session.masks["active_mask"] = best.mask
+            session.all_sam_masks = [
+                {"mask": r.mask, "score": r.score, "area": r.area} for r in results
+            ]
+
+            logger.info("【interactive/pick】SAM: selected_region, score=%.3f, area=%d", best.score, best.area)
+            return PickResponse(
+                layer="selected_region",
+                mask_png_base64=mask_to_png_base64(best.mask),
+            )
+        except Exception as e:
+            logger.warning("【interactive/pick】SAM predict 失败，降级到 legacy: %s", e)
+            # fall through to legacy
+
+    # ── Legacy 模式 ──
     try:
         layer, mask = pick_layer(session.masks, req.x, req.y)
     except Exception as e:
         logger.warning("pick_layer failed: %s", e)
         raise HTTPException(status_code=400, detail=f"拾取失败: {e}") from e
     
-    # Check if clicked on background
     if layer == "background" or (mask is not None and int(mask[req.y, req.x]) == 0):
-        # Return "none" for background clicks
         logger.info("【interactive/pick】clicked background, returning none")
-        # Return empty mask for "none"
-        empty_mask = np.zeros((h, w), dtype=np.uint8)
-        return PickResponse(
-            layer="none",
-            mask_png_base64=mask_to_png_base64(empty_mask),
-        )
+        return PickResponse(layer="none", mask_png_base64=mask_to_png_base64(empty_mask))
     
     logger.info("【interactive/pick】layer=%s", layer)
+    return PickResponse(layer=layer, mask_png_base64=mask_to_png_base64(mask))
+
+
+# ── SAM mask 候选切换 ──
+
+class SwitchMaskRequest(BaseModel):
+    session_id: str
+    mask_index: int  # 0/1/2
+
+
+@router.post("/interactive/switch-mask", response_model=PickResponse)
+async def switch_mask(req: SwitchMaskRequest) -> PickResponse:
+    """切换 SAM 候选 mask（精细/中等/粗略）"""
+    session = session_store.get_session(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if not session.all_sam_masks or req.mask_index >= len(session.all_sam_masks):
+        raise HTTPException(status_code=400, detail="无可用候选 mask")
+    
+    chosen = session.all_sam_masks[req.mask_index]
+    session.masks["active_mask"] = chosen["mask"]
+    
+    logger.info("【interactive/switch-mask】切换到 mask #%d, score=%.3f, area=%d",
+                req.mask_index, chosen["score"], chosen["area"])
     
     return PickResponse(
-        layer=layer,
-        mask_png_base64=mask_to_png_base64(mask),
+        layer="selected_region",
+        mask_png_base64=mask_to_png_base64(chosen["mask"]),
     )
 
 
@@ -266,7 +332,7 @@ async def interactive_edit(req: EditRequest) -> EditResponse:
         raise HTTPException(status_code=404, detail="Session not found")
     
     # Validate layer
-    valid_layers = ("field", "border", "rug")
+    valid_layers = ("field", "border", "rug", "selected_region")
     if req.layer not in valid_layers:
         raise HTTPException(
             status_code=422,
@@ -278,10 +344,12 @@ async def interactive_edit(req: EditRequest) -> EditResponse:
         raise HTTPException(status_code=422, detail="prompt 不能为空")
     
     # Get mask for layer
-    mask_key = f"{req.layer}_mask"
-    mask = session.masks.get(mask_key)
+    if req.layer == "selected_region":
+        mask = session.masks.get("active_mask")
+    else:
+        mask = session.masks.get(f"{req.layer}_mask")
     if mask is None:
-        raise HTTPException(status_code=400, detail=f"找不到 {mask_key}")
+        raise HTTPException(status_code=400, detail=f"找不到对应 mask，请先点击选择区域")
     
     # Parse prompt to edit params
     try:

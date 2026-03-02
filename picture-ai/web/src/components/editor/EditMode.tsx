@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Button, Input, Textarea, Tooltip, Spinner, Chip, Popover, PopoverTrigger, PopoverContent, Slider } from "@heroui/react";
+import { Button, Textarea, Tooltip, Spinner, Chip, Popover, PopoverTrigger, PopoverContent, Slider } from "@heroui/react";
 import { Upload } from "antd";
 
 import {
@@ -10,6 +10,7 @@ import {
     SettingOutlined,
 } from '@ant-design/icons';
 import { EditModeState } from '../../types';
+import { interactiveSwitchMask } from '../../services/api';
 
 interface EditModeProps {
     editMode: EditModeState;
@@ -23,6 +24,13 @@ interface EditModeProps {
     onAddToReference: () => void;
     onDownload: (src: string, name?: string) => void;
 }
+
+const LAYER_LABELS: Record<string, string> = {
+    field: '地场 (Field)',
+    border: '边框 (Border)',
+    rug: '整毯 (Rug)',
+    selected_region: '选中区域',
+};
 
 export const EditMode: React.FC<EditModeProps> = ({
     editMode,
@@ -198,15 +206,42 @@ export const EditMode: React.FC<EditModeProps> = ({
                                 variant="flat"
                                 color="secondary"
                             >
-                                {editMode.selectedLayer === 'field' && '地场 (Field)'}
-                                {editMode.selectedLayer === 'border' && '边框 (Border)'}
-                                {editMode.selectedLayer === 'rug' && '整毯 (Rug)'}
-                                {!['field', 'border', 'rug'].includes(editMode.selectedLayer) && editMode.selectedLayer}
+                                {LAYER_LABELS[editMode.selectedLayer] || editMode.selectedLayer}
                             </Chip>
                         ) : (
                             <span className="text-white/40 text-sm">未选中，请点击图片</span>
                         )}
                     </div>
+                    {/* SAM mask 粒度切换 */}
+                    {editMode.selectedLayer === 'selected_region' && editMode.meta?.seg_mode === 'sam' && editMode.sessionId && (
+                        <div className="flex gap-1 mt-1">
+                            {['精细', '中等', '粗略'].map((label, idx) => (
+                                <Button
+                                    key={idx}
+                                    size="sm"
+                                    variant="flat"
+                                    className="flex-1 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white text-xs border border-white/5"
+                                    isDisabled={editMode.editLoading}
+                                    onPress={async () => {
+                                        try {
+                                            setEditMode(p => ({ ...p, editLoading: true }));
+                                            const result = await interactiveSwitchMask(editMode.sessionId!, idx);
+                                            setEditMode(p => ({
+                                                ...p,
+                                                selectedLayer: result.layer,
+                                                maskDataUrl: `data:image/png;base64,${result.mask_png_base64}`,
+                                                editLoading: false,
+                                            }));
+                                        } catch {
+                                            setEditMode(p => ({ ...p, editLoading: false }));
+                                        }
+                                    }}
+                                >
+                                    {label}
+                                </Button>
+                            ))}
+                        </div>
+                    )}
                 </div >
 
                 {/* Prompt Input */}
@@ -268,7 +303,7 @@ export const EditMode: React.FC<EditModeProps> = ({
                 <div className="flex flex-col gap-2">
                     <div className="text-xs font-bold text-default-500 uppercase tracking-wider">工具</div>
                     <div className="grid grid-cols-2 gap-2">
-                        <Tooltip content="撤回上一步">
+                        <Tooltip content="撤回上一步" classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
                             <Button
                                 startContent={<UndoOutlined />}
                                 isDisabled={editMode.history.length <= 1 || editMode.editLoading}
@@ -279,7 +314,7 @@ export const EditMode: React.FC<EditModeProps> = ({
                                 撤回
                             </Button>
                         </Tooltip>
-                        <Tooltip content="下载">
+                        <Tooltip content="下载" classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
                             <Button
                                 startContent={<DownloadOutlined />}
                                 isDisabled={!editMode.currentImageDataUrl}
@@ -290,7 +325,7 @@ export const EditMode: React.FC<EditModeProps> = ({
                                 下载
                             </Button>
                         </Tooltip>
-                        <Tooltip content="加入对话作为参考图">
+                        <Tooltip content="加入对话作为参考图" classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
                             <Button
                                 startContent={<LinkOutlined />}
                                 isDisabled={!editMode.currentImageDataUrl}

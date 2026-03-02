@@ -12,11 +12,35 @@ set BACKEND_DIR=%PROJECT_ROOT%\back
 set FRONTEND_DIR=%PROJECT_ROOT%\web
 set VENV_PYTHON=%PROJECT_ROOT%\venv\Scripts\python.exe
 
-echo [1/4] Checking virtual environment...
-if not exist "%VENV_PYTHON%" (
-    echo [ERROR] Virtual environment not found!
-    pause
-    exit /b 1
+echo [1/4] Checking Python environment...
+
+set "PYTHON_CMD="
+
+if exist "%VENV_PYTHON%" (
+    set "PYTHON_CMD=%VENV_PYTHON%"
+    echo [OK] Using virtual environment Python
+) else (
+    where python >nul 2>nul
+    if %errorlevel% == 0 (
+        set "PYTHON_CMD=python"
+        echo [WARN] Virtual environment not found, using system Python
+    ) else (
+        where python3 >nul 2>nul
+        if %errorlevel% == 0 (
+            set "PYTHON_CMD=python3"
+            echo [WARN] Virtual environment not found, using system Python3
+        ) else (
+            echo [ERROR] Python not found!
+            echo.
+            echo To create a virtual environment, run:
+            echo   cd picture-ai
+            echo   python -m venv venv
+            echo   venv\Scripts\activate
+            echo   pip install -r back\requirements.txt
+            pause
+            exit /b 1
+        )
+    )
 )
 
 echo [2/4] Checking frontend dependencies...
@@ -33,7 +57,7 @@ if not exist "%FRONTEND_DIR%\node_modules" (
 
 echo [3/4] Starting Backend on port 8000...
 cd /d "%BACKEND_DIR%"
-start "Picture AI Backend" cmd /k "%VENV_PYTHON%" -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+start "Picture AI Backend" cmd /k "%PYTHON_CMD%" -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 timeout /t 3 /nobreak >nul
 

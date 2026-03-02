@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Button, Tooltip } from "@heroui/react";
-import { LinkOutlined, ReloadOutlined, DownloadOutlined, BgColorsOutlined, ScissorOutlined, FormatPainterOutlined } from '@ant-design/icons';
+import { LinkOutlined, ReloadOutlined, DownloadOutlined, BgColorsOutlined, ScissorOutlined, FormatPainterOutlined, CopyOutlined } from '@ant-design/icons';
+import { message } from 'antd';
 import { Message } from '../../types';
+import { PARAM_LABELS, DEFAULT_SCENE_VALUE } from '../../constants';
 
 interface MessageItemProps {
     message: Message;
@@ -11,12 +13,35 @@ interface MessageItemProps {
     onDownload: (src: string) => void;
     onImageLoad: () => void;
     onEditLayer?: (imageUrl: string) => void;
-    onColorEdit?: (imageUrl: string) => void;      // 换色
-    onCropEdit?: (imageUrl: string) => void;       // 裁切
+    onColorEdit?: (imageUrl: string) => void;
+    onCropEdit?: (imageUrl: string) => void;
 }
 
+const copyImageToClipboard = async (src: string) => {
+    try {
+        const res = await fetch(src);
+        const blob = await res.blob();
+        const pngBlob = blob.type === 'image/png' ? blob : await new Promise<Blob>((resolve) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                canvas.getContext('2d')!.drawImage(img, 0, 0);
+                canvas.toBlob((b) => resolve(b!), 'image/png');
+            };
+            img.src = URL.createObjectURL(blob);
+        });
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+        message.success('已复制图片');
+    } catch {
+        message.error('复制失败');
+    }
+};
+
 export const MessageItem: React.FC<MessageItemProps> = ({
-    message,
+    message: msg,
     onPreview,
     onUseAsReference,
     onRegenerate,
@@ -26,120 +51,153 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     onColorEdit,
     onCropEdit
 }) => {
-    const { type, content, text, isUser, source, params } = message;
+    const { type, content, text, isUser, source, params } = msg;
     const [hovered, setHovered] = useState(false);
     const resolvedSource = source || (isUser ? 'user' : 'generate');
     const canRegenerate = !isUser && resolvedSource === 'generate';
-    const hasBubbleParams = !!(params?.style || params?.ratio || params?.color || params?.scene);
+
+    // 过滤出有值的参数（排除场景默认值）
+    const activeParams = params
+        ? Object.entries(params).filter(([k, v]) => v && !(k === 'scene' && v === DEFAULT_SCENE_VALUE))
+        : [];
 
     return (
-        <div className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-6 group/msg animate-slide-up`}>
-            <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[85%] sm:max-w-[70%]`}>
+        <div className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-4 group/msg animate-slide-up`}>
+            <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} style={{ maxWidth: '55%' }}>
 
                 {/* Text Message */}
                 {type === 'text' && (
-                    <div className={`px-5 py-3 rounded-2xl border text-sm leading-relaxed shadow-sm backdrop-blur-sm ${isUser
+                    <div className={`px-4 py-2.5 rounded-2xl border text-sm leading-relaxed shadow-sm ${isUser
                         ? 'bg-[#2a2b3d]/80 border-cyan-500/20 text-white rounded-tr-sm'
                         : 'bg-white/5 border-white/10 text-white/90 rounded-tl-sm'
                         }`}>
                         <div className="whitespace-pre-wrap">{content}</div>
+                        {isUser && activeParams.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-white/10">
+                                {activeParams.map(([k, v]) => (
+                                    <span key={k} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 text-[11px] text-white/60">
+                                        <span className="text-white/40">{PARAM_LABELS[k] || k}</span>
+                                        <span className="text-cyan-300/80">{v}</span>
+                                    </span>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 )}
 
                 {/* Image / Mixed Message */}
                 {(type === 'image' || type === 'mixed') && (
-                    <div className="flex flex-col gap-3">
+                    <div className={`flex flex-col gap-2 ${isUser ? 'items-end' : 'items-start'}`}>
                         <div
                             className="relative group inline-block"
                             onMouseEnter={() => setHovered(true)}
                             onMouseLeave={() => setHovered(false)}
                         >
-                            {/* Art Frame Container */}
-                            <div className="relative rounded-[20px] overflow-hidden shadow-2xl transition-transform duration-500 ease-[var(--ease-spring)] hover:scale-[1.01]">
-                                {/* Inner Shadow Overlay (The "Inset" Feel) */}
-                                <div className="absolute inset-0 pointer-events-none z-10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1),inset_0_0_20px_rgba(0,0,0,0.5)] rounded-[20px]" />
-
+                            <div className="relative rounded-xl overflow-hidden shadow-lg">
                                 <img
                                     src={content}
-                                    alt="generated content"
-                                    className="max-h-[500px] object-contain bg-[#0f1016]"
+                                    alt="content"
+                                    className="max-h-[220px] max-w-[240px] object-contain bg-[#0f1016] cursor-pointer"
                                     loading="eager"
                                     onClick={() => onPreview(content)}
                                     onLoad={onImageLoad}
                                 />
                             </div>
 
-                            {/* Action Bar (Floating - Top Right) */}
-                            <div className={`absolute top-3 right-3 flex gap-1.5 p-1 rounded-xl bg-black/60 backdrop-blur-md border border-white/10 transition-all duration-300 ease-[var(--ease-spring)] z-20 ${hovered ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2 pointer-events-none'}`}>
-                                <Tooltip content="引用" delay={0} closeDelay={0}>
-                                    <Button isIconOnly size="sm" variant="light" className="w-8 h-8 text-white/70 hover:text-white hover:bg-white/10 rounded-lg" onPress={() => onUseAsReference(content)}>
-                                        <LinkOutlined />
-                                    </Button>
-                                </Tooltip>
-
-                                {canRegenerate && (
-                                    <Tooltip content="重绘" delay={0} closeDelay={0}>
-                                        <Button isIconOnly size="sm" variant="light" className="w-8 h-8 text-white/70 hover:text-white hover:bg-white/10 rounded-lg" onPress={() => onRegenerate(message)}>
-                                            <ReloadOutlined />
-                                        </Button>
-                                    </Tooltip>
-                                )}
-
-                                <Tooltip content="下载" delay={0} closeDelay={0}>
-                                    <Button isIconOnly size="sm" variant="light" className="w-8 h-8 text-white/70 hover:text-white hover:bg-white/10 rounded-lg" onPress={() => onDownload(content)}>
-                                        <DownloadOutlined />
-                                    </Button>
-                                </Tooltip>
-
-                                {/* 分隔符 */}
-                                <div className="w-px h-6 bg-white/10 self-center mx-0.5" />
-
-                                {/* 换色按钮 */}
-                                {onColorEdit && !isUser && (
-                                    <Tooltip content="换色" delay={0} closeDelay={0}>
-                                        <Button isIconOnly size="sm" variant="light" className="w-8 h-8 text-amber-400 hover:text-amber-300 hover:bg-amber-500/20 rounded-lg" onPress={() => onColorEdit(content)}>
-                                            <FormatPainterOutlined />
-                                        </Button>
-                                    </Tooltip>
-                                )}
-
-                                {/* 裁切按钮 */}
-                                {onCropEdit && !isUser && (
-                                    <Tooltip content="裁切" delay={0} closeDelay={0}>
-                                        <Button isIconOnly size="sm" variant="light" className="w-8 h-8 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/20 rounded-lg" onPress={() => onCropEdit(content)}>
-                                            <ScissorOutlined />
-                                        </Button>
-                                    </Tooltip>
-                                )}
-
-                                {/* 分层编辑按钮 */}
-                                {onEditLayer && !isUser && (
-                                    <Tooltip content="分层编辑" delay={0} closeDelay={0}>
-                                        <Button isIconOnly size="sm" variant="light" className="w-8 h-8 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-500/20 rounded-lg" onPress={() => onEditLayer(content)}>
-                                            <BgColorsOutlined />
-                                        </Button>
-                                    </Tooltip>
+                            {/* Action Bar - 右下角，不超出图片 */}
+                            <div className={`absolute bottom-2 right-2 flex gap-0.5 px-1 py-0.5 rounded-lg bg-black/70 backdrop-blur-sm border border-white/10 transition-all duration-200 z-20 ${hovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                                {isUser ? (
+                                    <>
+                                        <Tooltip content="引用到对话" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => onUseAsReference(content)}>
+                                                <LinkOutlined style={{ fontSize: 12 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        <Tooltip content="复制图片" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => copyImageToClipboard(content)}>
+                                                <CopyOutlined style={{ fontSize: 12 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        <Tooltip content="下载" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => onDownload(content)}>
+                                                <DownloadOutlined style={{ fontSize: 12 }} />
+                                            </Button>
+                                        </Tooltip>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Tooltip content="引用到对话" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => onUseAsReference(content)}>
+                                                <LinkOutlined style={{ fontSize: 12 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        {canRegenerate && (
+                                            <Tooltip content="重新生成" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                                <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => onRegenerate(msg)}>
+                                                    <ReloadOutlined style={{ fontSize: 12 }} />
+                                                </Button>
+                                            </Tooltip>
+                                        )}
+                                        <Tooltip content="下载" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => onDownload(content)}>
+                                                <DownloadOutlined style={{ fontSize: 12 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        {onColorEdit && (
+                                            <Tooltip content="换色" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                                <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-amber-400 hover:text-amber-300 rounded" onPress={() => onColorEdit(content)}>
+                                                    <FormatPainterOutlined style={{ fontSize: 12 }} />
+                                                </Button>
+                                            </Tooltip>
+                                        )}
+                                        {onCropEdit && (
+                                            <Tooltip content="裁切" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                                <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-emerald-400 hover:text-emerald-300 rounded" onPress={() => onCropEdit(content)}>
+                                                    <ScissorOutlined style={{ fontSize: 12 }} />
+                                                </Button>
+                                            </Tooltip>
+                                        )}
+                                        {onEditLayer && (
+                                            <Tooltip content="分层编辑" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                                <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-cyan-400 hover:text-cyan-300 rounded" onPress={() => onEditLayer(content)}>
+                                                    <BgColorsOutlined style={{ fontSize: 12 }} />
+                                                </Button>
+                                            </Tooltip>
+                                        )}
+                                    </>
                                 )}
                             </div>
                         </div>
 
-                        {/* Mixed Text or Params */}
-                        {isUser && hasBubbleParams && (
-                            <div className="flex flex-wrap justify-end gap-1.5 opacity-60 hover:opacity-100 transition-opacity">
-                                {params?.style && <span className="px-2 py-0.5 rounded text-[10px] bg-white/5 border border-white/10 text-white/60 font-mono tracking-wide">{params.style}</span>}
-                                {params?.ratio && <span className="px-2 py-0.5 rounded text-[10px] bg-white/5 border border-white/10 text-white/60 font-mono tracking-wide">{params.ratio}</span>}
-                                {params?.color && (
-                                    <span className="px-2 py-0.5 rounded text-[10px] bg-white/5 border border-white/10 text-white/60 font-mono tracking-wide flex items-center gap-1">
-                                        COLOR <span className="w-2 h-2 rounded-full" style={{ background: params.color }} />
-                                    </span>
+                        {type === 'mixed' && text && (
+                            <div className={`px-4 py-2 rounded-xl text-sm max-w-full ${isUser
+                                ? 'bg-[#2a2b3d]/80 border border-cyan-500/20 text-white rounded-tr-sm'
+                                : 'bg-white/5 border border-white/10 text-white/80'
+                                }`}>
+                                {text}
+                                {isUser && activeParams.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-white/10">
+                                        {activeParams.map(([k, v]) => (
+                                            <span key={k} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 text-[11px] text-white/60">
+                                                <span className="text-white/40">{PARAM_LABELS[k] || k}</span>
+                                                <span className="text-cyan-300/80">{v}</span>
+                                            </span>
+                                        ))}
+                                    </div>
                                 )}
-                                {params?.scene && <span className="px-2 py-0.5 rounded text-[10px] bg-white/5 border border-white/10 text-white/60 font-mono tracking-wide">{params.scene}</span>}
                             </div>
                         )}
-
-                        {type === 'mixed' && text && (
-                            <div className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-white/80 text-sm">
-                                {text}
+                        {/* 纯图片消息（无文字）也显示参数 */}
+                        {type === 'image' && isUser && activeParams.length > 0 && (
+                            <div className="px-3 py-1.5 rounded-xl bg-[#2a2b3d]/80 border border-cyan-500/20">
+                                <div className="flex flex-wrap gap-1.5">
+                                    {activeParams.map(([k, v]) => (
+                                        <span key={k} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 text-[11px] text-white/60">
+                                            <span className="text-white/40">{PARAM_LABELS[k] || k}</span>
+                                            <span className="text-cyan-300/80">{v}</span>
+                                        </span>
+                                    ))}
+                                </div>
                             </div>
                         )}
                     </div>

@@ -16,6 +16,9 @@ class EditSession:
     last_result_bgr: np.ndarray
     masks: dict[str, np.ndarray]
     meta: dict[str, Any]
+    sam_embedding: dict | None = None       # SAM embedding 缓存 (features tensor等)
+    image_rgb: np.ndarray | None = None     # 原始 RGB 图像
+    all_sam_masks: list | None = None       # 最近一次 pick 的全部候选 mask
 
 
 def _bgr_to_png_bytes(bgr: np.ndarray) -> bytes:
@@ -58,6 +61,8 @@ class SessionStore:
         last_result_bgr: np.ndarray,
         masks: dict[str, np.ndarray] | None = None,
         meta: dict[str, Any] | None = None,
+        sam_embedding: dict | None = None,
+        image_rgb: np.ndarray | None = None,
     ) -> EditSession:
         sid = uuid.uuid4().hex
         s = EditSession(
@@ -65,6 +70,8 @@ class SessionStore:
             last_result_bgr=last_result_bgr,
             masks=masks or {},
             meta=meta or {},
+            sam_embedding=sam_embedding,
+            image_rgb=image_rgb,
         )
         self._sessions[sid] = s
         return s

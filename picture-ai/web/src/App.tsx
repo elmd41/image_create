@@ -2,7 +2,7 @@
  * Picture AI Main Application
  * Refactored with HeroUI + Tailwind CSS
  */
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { message } from 'antd';
 import type { UploadFile } from 'antd/es/upload/interface';
 import {
@@ -11,6 +11,7 @@ import {
   interactiveUpload,
   interactivePick,
   interactiveEdit,
+  proxyImageUrl,
 } from './services/api';
 
 import { Header } from './components/layout/Header';
@@ -43,6 +44,38 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'chat' | 'edit'>('chat');
   const [loading, setLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // 全局粘贴图片监听器 - 支持在页面任意位置Ctrl+V粘贴图片
+  useEffect(() => {
+    const handleGlobalPaste = (e: ClipboardEvent) => {
+      // 如果正在加载或不在chat tab，忽略
+      if (loading || activeTab !== 'chat') return;
+      
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            setFileList([{ 
+              uid: Date.now().toString(), 
+              name: file.name || 'pasted-image.png', 
+              status: 'done', 
+              url: URL.createObjectURL(file), 
+              originFileObj: file as any 
+            }]);
+            message.success('已粘贴图片');
+            e.preventDefault();
+            break;
+          }
+        }
+      }
+    };
+
+    document.addEventListener('paste', handleGlobalPaste);
+    return () => document.removeEventListener('paste', handleGlobalPaste);
+  }, [loading, activeTab]);
 
   // --- Chat State ---
   const [chatHistory, setChatHistory] = useState<Message[]>([]);
@@ -108,17 +141,20 @@ const App: React.FC = () => {
   }, []);
 
   const urlToFile = async (url: string, filename: string): Promise<File> => {
-    const response = await fetch(url);
+    // 如果是后端URL，使用代理避免CORS问题
+    const fetchUrl = url.startsWith('data:') ? url : proxyImageUrl(url);
+    const response = await fetch(fetchUrl);
     const blob = await response.blob();
     return new File([blob], filename, { type: blob.type || 'image/png' });
   };
 
   // --- Action Handlers ---
   const handleAction = async (currentMode: 'search' | 'generate', options?: any) => {
-    // Re-implementing logic from original App.tsx
-    // Simplified for brevity but preserving core logic
     const paramsForRequest = options?.overrideParams || generateParams;
     let effectiveText = options?.overrideText || inputText;
+    const skipUserMessage = options?.skipUserMessage || false;
+    const overrideFile = options?.overrideFile as File | undefined;
+    const overrideRefImageUrl = options?.overrideRefImageUrl as string | undefined;
 
     // Auto build prompt if only params exist
     const showSceneChip = !!(paramsForRequest.scene && paramsForRequest.scene !== DEFAULT_SCENE_VALUE);
@@ -128,7 +164,8 @@ const App: React.FC = () => {
       effectiveText = buildParamsPrompt(paramsForRequest);
     }
 
-    if (!effectiveText && fileList.length === 0 && !(currentMode === 'generate' && hasParams)) {
+    const actualFile = overrideFile || (fileList[0]?.originFileObj as File | undefined);
+    if (!effectiveText && !actualFile && fileList.length === 0 && !(currentMode === 'generate' && hasParams)) {
       message.error('请输入文字或上传图片');
       return;
     }
@@ -139,20 +176,24 @@ const App: React.FC = () => {
     setLoading(true);
 
     const formData = new FormData();
-    const fileItem = fileList[0];
-    const fileToUpload = fileItem?.originFileObj as File | undefined;
+    const fileToUpload = actualFile;
 
     // User Message
+    let referenceImageDataUrl: string | undefined = overrideRefImageUrl;
     if (fileToUpload) {
       formData.append('file', fileToUpload);
-      const reader = new FileReader();
-      reader.onload = () => {
-        addMessage({ type: effectiveText ? 'mixed' : 'image', content: reader.result as string, text: effectiveText, isUser: true, source: 'user', params: currentMode === 'generate' ? paramsForRequest : undefined });
+      if (!skipUserMessage) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          referenceImageDataUrl = referenceImageDataUrl || (reader.result as string);
+          addMessage({ type: effectiveText ? 'mixed' : 'image', content: reader.result as string, text: effectiveText, isUser: true, source: 'user', params: currentMode === 'generate' ? paramsForRequest : undefined });
+        };
+        reader.readAsDataURL(fileToUpload);
       }
-      reader.readAsDataURL(fileToUpload);
-    } else {
+    } else if (!skipUserMessage) {
       addMessage({ type: 'text', content: effectiveText, isUser: true, source: 'user', params: currentMode === 'generate' ? paramsForRequest : undefined });
     }
+    const refImageUrl = fileList[0]?.url;
     setFileList([]);
 
     if (effectiveText) {
@@ -170,7 +211,7 @@ const App: React.FC = () => {
     try {
       let response;
       if (currentMode === 'search') {
-        formData.append('top_k', '1');
+        formData.append('top_k', '6');
         response = await search(formData, controller.signal);
       } else {
         response = await generate(formData, controller.signal);
@@ -180,7 +221,16 @@ const App: React.FC = () => {
       if (results?.length > 0) {
         results.forEach((item: any) => {
           const url = currentMode === 'search' ? `${API_URL}${item.path}` : (item.startsWith('/') ? `${API_URL}${item}` : item);
-          addMessage({ type: 'image', content: url, isUser: false, source: currentMode, prompt: effectiveText, params: paramsForRequest });
+          // 保存参考图信息，以便重新生成时使用
+          addMessage({ 
+            type: 'image', 
+            content: url, 
+            isUser: false, 
+            source: currentMode, 
+            prompt: effectiveText, 
+            params: paramsForRequest,
+            referenceImage: referenceImageDataUrl || refImageUrl,
+          });
         });
       } else {
         addMessage({ type: 'text', content: '未找到结果', isUser: false });
@@ -284,7 +334,9 @@ const App: React.FC = () => {
   // 打开换色对话框
   const handleOpenColorEdit = async (imageUrl: string) => {
     try {
-      const res = await fetch(imageUrl);
+      // 如果是后端URL，使用代理避免CORS问题
+      const fetchUrl = imageUrl.startsWith('data:') ? imageUrl : proxyImageUrl(imageUrl);
+      const res = await fetch(fetchUrl);
       const blob = await res.blob();
       const reader = new FileReader();
       reader.onload = () => {
@@ -300,7 +352,9 @@ const App: React.FC = () => {
   // 打开裁切对话框
   const handleOpenCropEdit = async (imageUrl: string) => {
     try {
-      const res = await fetch(imageUrl);
+      // 如果是后端URL，使用代理避免CORS问题
+      const fetchUrl = imageUrl.startsWith('data:') ? imageUrl : proxyImageUrl(imageUrl);
+      const res = await fetch(fetchUrl);
       const blob = await res.blob();
       const reader = new FileReader();
       reader.onload = () => {
@@ -369,23 +423,54 @@ const App: React.FC = () => {
               loading={loading}
               onPreview={(src) => setImagePreview({ open: true, src })}
               onUseAsReference={(url) => {
-                urlToFile(url, 'ref.png')
-                  .then(file => {
-                    setFileList([{
-                      uid: Date.now().toString(),
-                      name: 'ref.png',
-                      status: 'done',
-                      url,
-                      originFileObj: file as any
-                    }]);
+                // 优化：对于data: URL直接使用，跳过代理加速
+                if (url.startsWith('data:')) {
+                  fetch(url).then(r => r.blob()).then(blob => {
+                    const file = new File([blob], 'ref.png', { type: blob.type || 'image/png' });
+                    setFileList([{ uid: Date.now().toString(), name: 'ref.png', status: 'done', url, originFileObj: file as any }]);
                     message.success('已添加为参考图');
-                  })
-                  .catch(err => {
-                    console.error('引用失败:', err);
-                    message.error('引用图片失败，请重试');
-                  });
+                  }).catch(() => message.error('引用图片失败'));
+                } else {
+                  urlToFile(url, 'ref.png')
+                    .then(file => {
+                      setFileList([{ uid: Date.now().toString(), name: 'ref.png', status: 'done', url, originFileObj: file as any }]);
+                      message.success('已添加为参考图');
+                    })
+                    .catch(() => message.error('引用图片失败，请重试'));
+                }
               }}
-              onRegenerate={(msg) => handleAction('generate', { overrideText: msg.prompt, overrideParams: msg.params })}
+              onRegenerate={async (msg) => {
+                if (msg.referenceImage) {
+                  // 图生图重新生成：显示参考图+指令，直接传file给handleAction
+                  addMessage({ 
+                    type: msg.prompt ? 'mixed' : 'image', 
+                    content: msg.referenceImage, 
+                    text: msg.prompt ? `重新生成：${msg.prompt}` : '重新生成', 
+                    isUser: true, source: 'user', params: msg.params 
+                  });
+                  try {
+                    const file = await urlToFile(msg.referenceImage, 'ref.png');
+                    handleAction('generate', { 
+                      overrideText: msg.prompt, 
+                      overrideParams: msg.params, 
+                      skipUserMessage: true,
+                      overrideFile: file,
+                      overrideRefImageUrl: msg.referenceImage,
+                    });
+                  } catch (err) {
+                    console.error('重新生成失败:', err);
+                    message.error('重新生成失败');
+                  }
+                } else {
+                  // 文生图重新生成
+                  addMessage({ 
+                    type: 'text', 
+                    content: `重新生成：${msg.prompt || ''}`, 
+                    isUser: true, source: 'user', params: msg.params 
+                  });
+                  handleAction('generate', { overrideText: msg.prompt, overrideParams: msg.params, skipUserMessage: true });
+                }
+              }}
               onDownload={(src) => openDownloadDialog(src)}
               onEditLayer={(url) => {
                 urlToFile(url, 'edit.png').then(file => enterEditMode(file));

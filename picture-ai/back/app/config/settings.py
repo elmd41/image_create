@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     GENERATE_FLAT_QC_ENABLED: bool = True
     GENERATE_FLAT_QC_MAX_RETRIES: int = 2
 
+    # ==================== SAM 分割模型配置 ====================
+    SAM_CHECKPOINT: Path = _BACK_DIR / "models" / "sam" / "sam_vit_b_01ec64.pth"
+    SAM_MODEL_TYPE: str = "vit_b"
+    SAM_DEVICE: str = "auto"  # "auto" / "cuda" / "cpu"
+
     # ==================== 服务配置 ====================
     BACKEND_PUBLIC_URL: str = "http://127.0.0.1:8000"
     DEBUG: bool = True

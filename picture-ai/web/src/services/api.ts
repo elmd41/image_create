@@ -167,6 +167,29 @@ export const interactiveEdit = async (
 };
 
 /**
+ * 切换 SAM 候选 mask
+ * POST /api/interactive/switch-mask
+ */
+export const interactiveSwitchMask = async (
+  sessionId: string,
+  maskIndex: number,
+  signal?: AbortSignal
+): Promise<InteractivePickResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/interactive/switch-mask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, mask_index: maskIndex }),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+/**
  * 代理下载外部图片（绕过 CORS 限制）
  * POST /api/interactive/proxy-image
  */
