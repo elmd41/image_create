@@ -1,0 +1,27 @@
+﻿# Python
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Node.js
+node_modules/
+
+# Env & logs
+.env
+.env.*
+*.log
+
+# Local data (do not commit)
+picture-ai/data/*.db
+picture-ai/data/vector_store/
+picture-ai/data/generated/
+picture-ai/data/images/
+
+# Backups & reports at repo root
+_data_backup_*/
+Project_Report.md

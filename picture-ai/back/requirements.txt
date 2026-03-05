@@ -1,0 +1,42 @@
+# Picture AI - Backend Dependencies
+# ==================================
+
+# Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+
+# AI Services
+dashscope>=1.14.0
+
+# Database
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+
+# Vector Store
+faiss-cpu>=1.7.4
+chromadb>=0.4.0
+
+# Configuration
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# Image Processing
+pillow>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+scikit-learn>=1.3.0
+
+# HTTP Client
+requests>=2.31.0
+aiohttp>=3.8.0
+
+# CLI Tools
+tqdm>=4.66.0
+
+# Authentication (optional)
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Testing
+pytest>=7.4.0
