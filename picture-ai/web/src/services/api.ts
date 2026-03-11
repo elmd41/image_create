@@ -12,7 +12,10 @@
  * - 统一的错误拦截器
  */
 
-const API_BASE_URL = 'http://127.0.0.1:8000';
+// 根据环境自动选择 API 地址
+const API_BASE_URL = import.meta.env.PROD 
+  ? '' // 生产环境使用相对路径，通过 Nginx 代理
+  : 'http://127.0.0.1:8000'; // 开发环境直连本地后端
 
 const parseError = async (response: Response) => {
   const errorBody = await response.json().catch(() => {

@@ -1,0 +1,23 @@
+[Unit]
+Description=Picture AI Backend Service
+After=network.target mysql.service docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/picture-ai/back
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/var/www/picture-ai/back/.env
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/picture-ai/backend.log
+StandardError=append:/var/log/picture-ai/backend.error.log
+
+# 进程管理
+TimeoutStartSec=30
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

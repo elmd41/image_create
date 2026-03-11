@@ -59,7 +59,8 @@ export const CropDialog: React.FC<CropDialogProps> = ({
                 body.border_mask_base64 = borderMaskBase64;
             }
 
-            const res = await fetch('http://127.0.0.1:8000/api/crop/to-size', {
+            const apiUrl = import.meta.env.PROD ? '' : 'http://127.0.0.1:8000';
+            const res = await fetch(`${apiUrl}/api/crop/to-size`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),

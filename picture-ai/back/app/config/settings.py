@@ -43,7 +43,26 @@ class Settings(BaseSettings):
     GENERATED_PATH: Path = _DATA_DIR / "generated"
 
     # ==================== 数据库配置 ====================
+    # 支持 SQLite 和 MySQL
+    # DB_TYPE: sqlite 或 mysql
+    DB_TYPE: str = "sqlite"
+    
+    # SQLite 配置
     DATABASE_URL: str = f"sqlite:///{_DATA_DIR / 'picture_ai.db'}"
+    
+    # MySQL 配置（生产环境使用）
+    MYSQL_HOST: str = "127.0.0.1"
+    MYSQL_PORT: int = 3306
+    MYSQL_USER: str = "root"
+    MYSQL_PASSWORD: str = "rootpassword"
+    MYSQL_DATABASE: str = "picture_ai"
+    
+    @property
+    def effective_database_url(self) -> str:
+        """根据 DB_TYPE 返回实际数据库连接字符串"""
+        if self.DB_TYPE == "mysql":
+            return f"mysql+pymysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}"
+        return self.DATABASE_URL
 
     # ==================== API Keys ====================
     # DashScope (阿里云通义千问)
@@ -92,7 +111,9 @@ class Settings(BaseSettings):
     QWEN_IMAGE_LAYERED_POLL_MAX_SECONDS: int = 180
 
     # ==================== 服务配置 ====================
+    # 生产环境设置为实际域名
     BACKEND_PUBLIC_URL: str = "http://127.0.0.1:8000"
+    PRODUCTION_URL: str = "http://pic.deluagent.com"
     DEBUG: bool = True
 
 

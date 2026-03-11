@@ -39,7 +39,8 @@ import { ColorVariantPanel } from './components/shared/ColorVariantPanel';
 import { Message, GenerateParams, EditModeState, LayerItem, EditSnapshot } from './types';
 import { DEFAULT_SCENE_VALUE } from './constants';
 
-const API_URL = 'http://127.0.0.1:8000';
+// 根据环境自动选择 API 地址
+const API_URL = import.meta.env.PROD ? '' : 'http://127.0.0.1:8000';
 
 const initialEditModeState: EditModeState = {
   active: false,
