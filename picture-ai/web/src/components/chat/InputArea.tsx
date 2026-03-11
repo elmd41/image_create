@@ -142,14 +142,14 @@ export const InputArea: React.FC<InputAreaProps> = ({
     };
 
     return (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-4xl px-4 z-50">
+        <div className="absolute left-1/2 -translate-x-1/2 w-full max-w-4xl px-4 z-40 bottom-4">
             <div className="relative group bg-[#12121a]/90 backdrop-blur-2xl rounded-2xl border border-white/10 shadow-[0_20px_50px_-10px_rgba(0,0,0,0.8)] transition-all duration-300 focus-within:bg-[#12121a]/95">
 
-                <div className="absolute inset-0 rounded-2xl overflow-hidden opacity-0 group-focus-within:opacity-100 transition-opacity duration-500 pointer-events-none">
-                    <BorderBeam size={300} duration={8} delay={9} colorFrom="#06b6d4" colorTo="#0891b2" />
-                </div>
+                    <div className="absolute inset-0 rounded-2xl overflow-hidden opacity-0 group-focus-within:opacity-100 transition-opacity duration-500 pointer-events-none">
+                        <BorderBeam size={300} duration={8} delay={9} colorFrom="#06b6d4" colorTo="#0891b2" />
+                    </div>
 
-                <div className="flex flex-col px-3 py-2.5">
+                    <div className="flex flex-col px-3 py-2.5">
                     {/* 上传预览 */}
                     {fileList.length > 0 && (
                         <div className="flex gap-2 mb-2 ml-10">
@@ -206,7 +206,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
                                     disabled={loading || isInputLocked}
                                     classNames={{
                                         base: "w-full",
-                                        input: "text-sm text-white placeholder:text-white/30 caret-cyan-400 py-1.5",
+                                        input: "!text-sm !text-white placeholder:!text-white/30 caret-cyan-400 py-1.5",
                                         inputWrapper: "!bg-transparent shadow-none border-none p-0 min-h-0 data-[hover=true]:bg-transparent group-data-[focus=true]:bg-transparent items-center"
                                     }}
                                 />

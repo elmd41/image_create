@@ -13,7 +13,7 @@ interface ChatAreaProps {
     onImageLoad?: () => void;
     onEditLayer?: (imageUrl: string) => void;
     onColorEdit?: (imageUrl: string) => void;
-    onCropEdit?: (imageUrl: string) => void;
+    onRegenerateColorVariant?: (config: NonNullable<Message['colorVariantConfig']>) => void;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -26,7 +26,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     onImageLoad,
     onEditLayer,
     onColorEdit,
-    onCropEdit
+    onRegenerateColorVariant
 }) => {
     const endRef = useRef<HTMLDivElement>(null);
 
@@ -39,32 +39,37 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         endRef.current?.scrollIntoView({ behavior: 'smooth' });
     };
 
-    return (
-        <div className="flex-1 overflow-y-auto w-full p-6 scroll-smooth">
-            {/* pb-40 确保内容不会被底部输入框遮挡 */}
-            <div className="max-w-[860px] mx-auto h-full px-4 box-border relative pb-44">
-                {messages.length === 0 ? (
-                    <EmptyState />
-                ) : (
-                    <div className="flex flex-col pb-4">
-                        {messages.map((msg, index) => (
-                            <MessageItem
-                                key={index}
-                                message={msg}
-                                onPreview={onPreview}
-                                onUseAsReference={onUseAsReference}
-                                onRegenerate={onRegenerate}
-                                onDownload={onDownload}
-                                onImageLoad={handleImageLoad}
-                                onEditLayer={onEditLayer}
-                                onColorEdit={onColorEdit}
-                                onCropEdit={onCropEdit}
-                            />
-                        ))}
-                    </div>
-                )}
+    // 空状态：绝对定位居中
+    if (messages.length === 0) {
+        return (
+            <div className="absolute inset-0 flex items-center justify-center">
+                <EmptyState />
+            </div>
+        );
+    }
 
-                {/* 处理中提示 - 在输入框边界上方显示小字 */}
+    // 有消息：正常滚动列表
+    return (
+        <div className="absolute inset-0 overflow-y-auto scroll-smooth">
+            <div className="max-w-[860px] mx-auto px-4 pt-6 pb-32 box-border">
+                <div className="flex flex-col pb-4">
+                    {messages.map((msg, index) => (
+                        <MessageItem
+                            key={index}
+                            message={msg}
+                            onPreview={onPreview}
+                            onUseAsReference={onUseAsReference}
+                            onRegenerate={onRegenerate}
+                            onDownload={onDownload}
+                            onImageLoad={handleImageLoad}
+                            onEditLayer={onEditLayer}
+                            onColorEdit={onColorEdit}
+                            onRegenerateColorVariant={onRegenerateColorVariant}
+                        />
+                    ))}
+                </div>
+
+                {/* 处理中提示 */}
                 {loading && (
                     <div className="w-full flex justify-center py-2">
                         <span className="text-gray-400 text-xs tracking-wider animate-pulse">处理中......</span>

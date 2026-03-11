@@ -23,7 +23,11 @@ def pick_layer(masks: dict[str, np.ndarray], x: int, y: int) -> tuple[str, np.nd
         raise ValueError("x/y must be >= 0")
 
     def _get(key: str) -> np.ndarray | None:
-        return masks.get(key) or masks.get(f"{key}_mask")
+        value = masks.get(key)
+        if value is not None:
+            return value
+        alt_key = f"{key}_mask"
+        return masks.get(alt_key)
 
     candidates: list[tuple[str, np.ndarray]] = []
     for layer in LAYER_ORDER:

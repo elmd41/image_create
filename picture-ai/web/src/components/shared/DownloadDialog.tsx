@@ -11,10 +11,10 @@ interface DownloadDialogProps {
 
 const FORMAT_OPTIONS = [
     { value: 'png', label: 'PNG', desc: '无损压缩，支持透明' },
-    { value: 'jpg', label: 'JPG', desc: '文件较小，不仅支持透明' },
+    { value: 'jpg', label: 'JPG', desc: '文件较小，不支持透明' },
     { value: 'webp', label: 'WEBP', desc: '现代格式，高压缩率' },
-    { value: 'bmp', label: 'BMP', desc: '无压缩位图，文件较大' },
-    { value: 'tiff', label: 'TIFF', desc: '高质量打印，支持分层' },
+    { value: 'bmp', label: 'BMP', desc: '300DPI高分辨率，工业打印' },
+    { value: 'tiff', label: 'TIFF', desc: '300DPI无损压缩，专业印刷' },
 ];
 
 export const DownloadDialog: React.FC<DownloadDialogProps> = ({

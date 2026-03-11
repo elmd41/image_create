@@ -31,12 +31,20 @@ async def select_pick(
     if not s:
         raise HTTPException(status_code=404, detail="session not found")
 
+    x = int(x)
+    y = int(y)
+
+    if s.last_result_bgr is not None:
+        height, width = s.last_result_bgr.shape[:2]
+        if x >= width or y >= height:
+            raise HTTPException(status_code=400, detail="x/y out of bounds")
+
     try:
-        layer, mask = pick_layer(s.masks, int(x), int(y))
+        layer, mask = pick_layer(s.masks, x, y)
         return PickLayerResponse(
             session_id=session_id,
-            x=int(x),
-            y=int(y),
+            x=x,
+            y=y,
             layer=layer,
             mask_png_base64=mask_to_png_base64(mask),
         )

@@ -14,7 +14,7 @@ interface MessageItemProps {
     onImageLoad: () => void;
     onEditLayer?: (imageUrl: string) => void;
     onColorEdit?: (imageUrl: string) => void;
-    onCropEdit?: (imageUrl: string) => void;
+    onRegenerateColorVariant?: (config: NonNullable<Message['colorVariantConfig']>) => void;
 }
 
 const copyImageToClipboard = async (src: string) => {
@@ -49,9 +49,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({
     onImageLoad,
     onEditLayer,
     onColorEdit,
-    onCropEdit
+    onRegenerateColorVariant
 }) => {
-    const { type, content, text, isUser, source, params } = msg;
+    const { type, content, text, isUser, source, params, images, colorVariantConfig } = msg;
     const [hovered, setHovered] = useState(false);
     const resolvedSource = source || (isUser ? 'user' : 'generate');
     const canRegenerate = !isUser && resolvedSource === 'generate';
@@ -61,9 +61,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({
         ? Object.entries(params).filter(([k, v]) => v && !(k === 'scene' && v === DEFAULT_SCENE_VALUE))
         : [];
 
+    // image_grid 类型使用更大的宽度
+    const maxWidth = type === 'image_grid' ? '100%' : '55%';
+
     return (
         <div className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-4 group/msg animate-slide-up`}>
-            <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} style={{ maxWidth: '55%' }}>
+            <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} style={{ maxWidth }}>
 
                 {/* Text Message */}
                 {type === 'text' && (
@@ -105,7 +108,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                             </div>
 
                             {/* Action Bar - 右下角，不超出图片 */}
-                            <div className={`absolute bottom-2 right-2 flex gap-0.5 px-1 py-0.5 rounded-lg bg-black/70 backdrop-blur-sm border border-white/10 transition-all duration-200 z-20 ${hovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                            <div className={`absolute bottom-2 right-2 flex gap-0.5 px-1 py-0.5 rounded-lg bg-black/70 backdrop-blur-sm border border-white/10 transition-all duration-200 z-[60] ${hovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
                                 {isUser ? (
                                     <>
                                         <Tooltip content="引用到对话" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
@@ -144,23 +147,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                                             </Button>
                                         </Tooltip>
                                         {onColorEdit && (
-                                            <Tooltip content="换色" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Tooltip content="套色" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
                                                 <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-amber-400 hover:text-amber-300 rounded" onPress={() => onColorEdit(content)}>
                                                     <FormatPainterOutlined style={{ fontSize: 12 }} />
-                                                </Button>
-                                            </Tooltip>
-                                        )}
-                                        {onCropEdit && (
-                                            <Tooltip content="裁切" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
-                                                <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-emerald-400 hover:text-emerald-300 rounded" onPress={() => onCropEdit(content)}>
-                                                    <ScissorOutlined style={{ fontSize: 12 }} />
                                                 </Button>
                                             </Tooltip>
                                         )}
                                         {onEditLayer && (
                                             <Tooltip content="分层编辑" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
                                                 <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-cyan-400 hover:text-cyan-300 rounded" onPress={() => onEditLayer(content)}>
-                                                    <BgColorsOutlined style={{ fontSize: 12 }} />
+                                                    <ScissorOutlined style={{ fontSize: 12 }} />
                                                 </Button>
                                             </Tooltip>
                                         )}
@@ -200,6 +196,68 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                                 </div>
                             </div>
                         )}
+                    </div>
+                )}
+
+                {/* Image Grid Message - 套色结果 */}
+                {type === 'image_grid' && images && images.length > 0 && (
+                    <div className="flex flex-col gap-2 w-full">
+                        <div className="flex items-center justify-between mb-1">
+                            <div className="text-xs text-white/50">{content}</div>
+                            {/* 重新生成套色按钮 - 整体重新生成 */}
+                            {colorVariantConfig && onRegenerateColorVariant && (
+                                <Tooltip content="重新生成套色" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                    <Button isIconOnly size="sm" variant="light" className="w-6 h-6 min-w-6 text-white/70 hover:text-white rounded" onPress={() => onRegenerateColorVariant(colorVariantConfig)}>
+                                        <ReloadOutlined style={{ fontSize: 12 }} />
+                                    </Button>
+                                </Tooltip>
+                            )}
+                        </div>
+                        {/* 图片网格 - 保持原尺寸，从左到右排列，间隙均匀 */}
+                        <div className="grid gap-3" style={{ 
+                            gridTemplateColumns: `repeat(auto-fill, minmax(160px, 1fr))`,
+                            justifyItems: 'center'
+                        }}>
+                            {images.map((imgUrl, idx) => (
+                                <div 
+                                    key={idx} 
+                                    className="relative rounded-xl overflow-hidden border border-white/10 group/gridimg cursor-pointer bg-black/20"
+                                >
+                                    <img 
+                                        src={imgUrl} 
+                                        alt={`套色 ${idx + 1}`} 
+                                        className="w-full h-auto object-contain" 
+                                        onClick={() => onPreview(imgUrl)}
+                                        onLoad={onImageLoad}
+                                    />
+                                    {/* 悬停时显示操作按钮 */}
+                                    <div className="absolute bottom-1 right-1 flex gap-1 opacity-0 group-hover/gridimg:opacity-100 transition-opacity bg-black/60 rounded-lg px-1 py-0.5">
+                                        <Tooltip content="引用" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-5 h-5 min-w-5 text-white/70 hover:text-white rounded" onPress={() => onUseAsReference(imgUrl)}>
+                                                <LinkOutlined style={{ fontSize: 10 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        <Tooltip content="重新生成套色" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-5 h-5 min-w-5 text-white/70 hover:text-white rounded" onPress={() => colorVariantConfig && onRegenerateColorVariant?.(colorVariantConfig)}>
+                                                <ReloadOutlined style={{ fontSize: 10 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        <Tooltip content="下载" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                            <Button isIconOnly size="sm" variant="light" className="w-5 h-5 min-w-5 text-white/70 hover:text-white rounded" onPress={() => onDownload(imgUrl)}>
+                                                <DownloadOutlined style={{ fontSize: 10 }} />
+                                            </Button>
+                                        </Tooltip>
+                                        {onEditLayer && (
+                                            <Tooltip content="分层编辑" placement="top" delay={0} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                                                <Button isIconOnly size="sm" variant="light" className="w-5 h-5 min-w-5 text-cyan-400 hover:text-cyan-300 rounded" onPress={() => onEditLayer(imgUrl)}>
+                                                    <ScissorOutlined style={{ fontSize: 10 }} />
+                                                </Button>
+                                            </Tooltip>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 )}
             </div>

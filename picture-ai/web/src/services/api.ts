@@ -68,8 +68,10 @@ export interface InteractiveUploadResponse {
     w: number;
     h: number;
     seg_mode: string;
-    alpha_val: number;
     filename?: string;
+    layer_count?: number;
+    layer_names?: string[];
+    qwen_status?: string;
   };
 }
 
@@ -82,6 +84,17 @@ export interface InteractiveEditResponse {
   result_png_base64: string;
   layer_mask_png_base64: string;
   applied_params: Record<string, unknown>;
+}
+
+export interface InteractiveLayerItem {
+  id: string;
+  name: string;
+  mask_png_base64: string;
+  thumbnail_png_base64: string;
+}
+
+export interface InteractiveLayersResponse {
+  layers: InteractiveLayerItem[];
 }
 
 /**
@@ -148,14 +161,36 @@ export const interactivePick = async (
  */
 export const interactiveEdit = async (
   sessionId: string,
-  layer: string,
+  layers: string[],
   prompt: string,
   signal?: AbortSignal
 ): Promise<InteractiveEditResponse> => {
   const response = await fetch(`${API_BASE_URL}/api/interactive/edit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, layer, prompt }),
+    body: JSON.stringify({ session_id: sessionId, layers, prompt }),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+/**
+ * 获取图层列表
+ * POST /api/interactive/layers
+ */
+export const interactiveLayers = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<InteractiveLayersResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/interactive/layers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
     signal,
   });
 
@@ -206,6 +241,305 @@ export const proxyImage = async (
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+// ==================== 会话管理 API ====================
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  thumbnail: string | null;
+  firstPrompt: string | null;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatMessage {
+  id: number;
+  sessionId: string;
+  type: string;
+  content: string;
+  text: string | null;
+  prompt: string | null;
+  referenceImage: string | null;
+  source: string | null;
+  params: Record<string, unknown> | null;
+  images: string[] | null;
+  colorVariantConfig: {
+    originalImageBase64: string;
+    count: number;
+    colorScheme: string[] | null;
+  } | null;
+  isUser: boolean;
+  createdAt: string;
+}
+
+export interface EditSession {
+  id: string;
+  title: string;
+  thumbnail: string | null;
+  originalImage: string | null;
+  layerCount: number;
+  stepCount: number;
+  meta: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EditSnapshotData {
+  id: number;
+  sessionId: string;
+  stepIndex: number;
+  imageDataUrl: string;
+  layers: Record<string, unknown>[];
+  prompt: string | null;
+  createdAt: string;
+}
+
+// === 聊天会话 ===
+
+export const listChatSessions = async (signal?: AbortSignal): Promise<ChatSession[]> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const createChatSession = async (
+  data: { title?: string; thumbnail?: string; firstPrompt?: string },
+  signal?: AbortSignal
+): Promise<ChatSession> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const getChatSession = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<ChatSession> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat/${sessionId}`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const updateChatSession = async (
+  sessionId: string,
+  data: { title?: string; thumbnail?: string; firstPrompt?: string },
+  signal?: AbortSignal
+): Promise<ChatSession> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat/${sessionId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const deleteChatSession = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat/${sessionId}`, {
+    method: 'DELETE',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+};
+
+export const getChatMessages = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<ChatMessage[]> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat/${sessionId}/messages`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const addChatMessage = async (
+  sessionId: string,
+  data: {
+    type?: string;
+    content: string;
+    text?: string;
+    prompt?: string;
+    referenceImage?: string;
+    source?: string;
+    params?: Record<string, unknown>;
+    images?: string[];
+    colorVariantConfig?: { originalImageBase64: string; count: number; colorScheme: string[] | null };
+    isUser: boolean;
+  },
+  signal?: AbortSignal
+): Promise<{ id: number; success: boolean }> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/chat/${sessionId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+// === 编辑会话 ===
+
+export const listEditSessions = async (signal?: AbortSignal): Promise<EditSession[]> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const createEditSession = async (
+  data: { title?: string; thumbnail?: string; originalImage?: string; layerCount?: number; meta?: Record<string, unknown> },
+  signal?: AbortSignal
+): Promise<EditSession> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const getEditSession = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<EditSession> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit/${sessionId}`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const updateEditSession = async (
+  sessionId: string,
+  data: { title?: string; thumbnail?: string; layerCount?: number; stepCount?: number },
+  signal?: AbortSignal
+): Promise<EditSession> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit/${sessionId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const deleteEditSession = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit/${sessionId}`, {
+    method: 'DELETE',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+};
+
+export const getEditSnapshots = async (
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<EditSnapshotData[]> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit/${sessionId}/snapshots`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+};
+
+export const addEditSnapshot = async (
+  sessionId: string,
+  data: { stepIndex: number; imageDataUrl: string; layers: Record<string, unknown>[]; prompt?: string },
+  signal?: AbortSignal
+): Promise<{ id: number; success: boolean }> => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/edit/${sessionId}/snapshots`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
     signal,
   });
 

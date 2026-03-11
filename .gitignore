@@ -11,6 +11,10 @@ env/
 # Node.js
 node_modules/
 
+# Build outputs
+**/dist/
+**/.vite/
+
 # Env & logs
 .env
 .env.*
@@ -21,6 +25,9 @@ picture-ai/data/*.db
 picture-ai/data/vector_store/
 picture-ai/data/generated/
 picture-ai/data/images/
+
+# Test outputs
+**/tests/qwen_output/
 
 # Backups & reports at repo root
 _data_backup_*/

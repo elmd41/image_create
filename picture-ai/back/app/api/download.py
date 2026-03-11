@@ -45,7 +45,10 @@ async def fetch_image_content(url: str) -> bytes:
         raise HTTPException(status_code=400, detail="Invalid URL format")
 
 def convert_image(content: bytes, target_format: str) -> io.BytesIO:
-    """同步的图片转换逻辑 (将在线程池中运行)"""
+    """同步的图片转换逻辑 (将在线程池中运行)
+    
+    对于 BMP/TIFF 格式，输出 300DPI 高分辨率，适合工业打印用途。
+    """
     try:
         # 打开图片
         img = Image.open(io.BytesIO(content))
@@ -62,8 +65,26 @@ def convert_image(content: bytes, target_format: str) -> io.BytesIO:
         save_format = target_format.upper()
         if save_format == 'JPG':
             save_format = 'JPEG'
+        
+        # 工业格式 BMP/TIFF 使用 300DPI 高分辨率
+        if save_format in ('BMP', 'TIFF'):
+            # 设置 300 DPI (每英寸 300 像素)
+            dpi = (300, 300)
+            if save_format == 'TIFF':
+                # TIFF 支持无损压缩和更多元数据
+                img.save(output, format=save_format, dpi=dpi, compression='tiff_lzw')
+            else:
+                # BMP 格式
+                img.save(output, format=save_format, dpi=dpi)
+        else:
+            # 其他格式正常保存
+            if save_format == 'JPEG':
+                img.save(output, format=save_format, quality=95)
+            elif save_format == 'WEBP':
+                img.save(output, format=save_format, quality=95)
+            else:
+                img.save(output, format=save_format)
             
-        img.save(output, format=save_format)
         output.seek(0)
         return output
     except Exception as e:

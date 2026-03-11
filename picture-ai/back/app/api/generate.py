@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
@@ -30,7 +31,7 @@ from pydantic import BaseModel
 
 from app.config.settings import settings
 from app.service.segmentation.rule_segmenter import segment_rug_layers
-from app.service.volcengine_service import volcengine_service
+from app.service.volcengine_service import volcengine_service, volcengine_multi_image_service
 from app.service.vision_service import VisionService, vision_service
 from app.utils.color_matcher import describe_color, parse_color
 
@@ -101,6 +102,61 @@ def _ensure_carpet_subject(user_prompt: str | None) -> str:
         return p
 
     return f"地毯，{p}"
+
+
+def _extract_image_count(prompt: str) -> tuple[int, str]:
+    """
+    从用户提示词中提取生成数量需求
+    
+    支持的表达方式:
+    - "生成3张图"、"生成三张"
+    - "给我5张"、"出4张"
+    - "来3个"、"要5个版本"
+    
+    Returns:
+        (count, cleaned_prompt): 数量(1-10)和清理后的提示词
+    """
+    import re
+    
+    # 中文数字映射
+    cn_num_map = {
+        '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10
+    }
+    
+    text = (prompt or "").strip()
+    count = 1
+    cleaned = text
+    
+    # 匹配模式：数字+张/个/版本/幅 或 中文数字+张/个/版本/幅
+    patterns = [
+        # "生成3张图"、"生成三张"、"3张图"
+        r'(?:生成|出|给我|来|要|做)\s*(\d+)\s*(?:张|个|幅|版本|款)',
+        r'(?:生成|出|给我|来|要|做)\s*([一二两三四五六七八九十])\s*(?:张|个|幅|版本|款)',
+        # "3张"、"三张"（更宽松的匹配）
+        r'(\d+)\s*(?:张|个|幅|版本|款)(?:图|图片|地毯)?',
+        r'([一二两三四五六七八九十])\s*(?:张|个|幅|版本|款)(?:图|图片|地毯)?',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            num_str = match.group(1)
+            if num_str.isdigit():
+                count = int(num_str)
+            elif num_str in cn_num_map:
+                count = cn_num_map[num_str]
+            
+            # 清理提示词中的数量表达
+            cleaned = re.sub(pattern, '', text).strip()
+            # 清理多余的标点
+            cleaned = re.sub(r'^[，,、。.\s]+|[，,、。.\s]+$', '', cleaned)
+            break
+    
+    # 限制范围 1-10
+    count = max(1, min(10, count))
+    
+    return count, cleaned if cleaned else text
 
 
 def _wants_perspective_or_scene(user_prompt: str) -> bool:
@@ -277,7 +333,14 @@ async def generate(
     工作流程:
     1. DashScope (qwen-plus/qwen-vl-max) 优化提示词
     2. 火山引擎 (doubao-seedream) 生成图片
+    
+    支持在提示词中指定生成数量，如"生成3张红色地毯"
     """
+    # 从提示词中提取生成数量
+    image_count, cleaned_prompt = _extract_image_count(prompt)
+    if image_count > 1:
+        logger.info("【检测到多图需求】: 将生成 %d 张图片", image_count)
+    
     ratio_clean = (ratio or "").replace(" ", "")
     if ratio_clean and size == "1024*1024":
         mapped = RATIO_SIZE_MAP.get(ratio_clean)
@@ -287,6 +350,8 @@ async def generate(
     logger.info("=" * 70)
     logger.info("【收到图像生成请求】")
     logger.info("【用户输入】: %s", prompt)
+    logger.info("【清理后提示词】: %s", cleaned_prompt)
+    logger.info("【生成数量】: %d", image_count)
     logger.info("【上传文件】: %s", file.filename if file else "无")
     logger.info("【参考URL】: %s", reference_url if reference_url else "无")
     logger.info("【图片尺寸】: %s", size)
@@ -298,7 +363,7 @@ async def generate(
     # 图生图与文生图业务分离：
     # - 图生图：不扩写、不注入默认场景/工业模板，仅使用用户指令 + 参数
     # - 文生图：可对短输入受限扩写，并在默认场景下套工业模板
-    raw_prompt_with_subject = _ensure_carpet_subject(prompt)
+    raw_prompt_with_subject = _ensure_carpet_subject(cleaned_prompt)
     edit_prompt = _build_enhanced_prompt(
         raw_prompt_with_subject,
         style,
@@ -310,78 +375,104 @@ async def generate(
 
     try:
         prompt_attempt = ""
+        all_results: list[str] = []
+        assistant_confirm: str | None = None
 
-        ratio_in_prompt = re.search(r"\d+\s*:\s*\d+", (prompt or "")) is not None
+        ratio_in_prompt = re.search(r"\d+\s*:\s*\d+", (cleaned_prompt or "")) is not None
         preserve_reference_ratio = (not ratio) and (not ratio_in_prompt) and (size == "1024*1024")
 
-        if file:
-            prompt_attempt = edit_prompt
-            logger.info("【增强提示词】: %s", prompt_attempt)
-            logger.info("【模式】: 图生图 (上传图片)")
-            results, assistant_confirm = _image_to_image_from_upload(
-                file,
-                edit_prompt,
-                None,
-                size,
-                preserve_reference_ratio=preserve_reference_ratio,
-            )
-        elif reference_url:
-            prompt_attempt = edit_prompt
-            logger.info("【增强提示词】: %s", prompt_attempt)
-            logger.info("【模式】: 图生图 (URL引用)")
-            results, assistant_confirm = _image_to_image_from_url(
-                reference_url,
-                edit_prompt,
-                None,
-                size,
-                preserve_reference_ratio=preserve_reference_ratio,
-            )
-        else:
-            inferred = _infer_generate_action(edit_prompt, context)
-            if inferred["action"] == "image_to_image" and inferred.get("reference_url"):
-                ratio_only_from_text, ratio_val = _is_ratio_only_prompt(edit_prompt)
-                if ratio_only_from_text and ratio_val:
-                    prompt_attempt = _apply_ratio_fill_instruction(ratio_val, edit_prompt)
-                else:
+        # 根据生成数量循环生成
+        for i in range(image_count):
+            if image_count > 1:
+                logger.info("【生成第 %d/%d 张图片】", i + 1, image_count)
+            
+            if file:
+                # 图生图只在第一次时读取文件，后续复用
+                if i == 0:
                     prompt_attempt = edit_prompt
-                logger.info("【增强提示词】: %s", prompt_attempt)
-                logger.info("【模式】: 图生图 (上下文推断) | reference_url=%s", inferred.get("reference_url"))
-                results, assistant_confirm = _image_to_image_from_url(
-                    inferred["reference_url"],
-                    prompt_attempt,
+                    logger.info("【增强提示词】: %s", prompt_attempt)
+                    logger.info("【模式】: 图生图 (上传图片)")
+                results, confirm = _image_to_image_from_upload(
+                    file,
+                    edit_prompt,
                     None,
                     size,
                     preserve_reference_ratio=preserve_reference_ratio,
                 )
-            else:
-                # 文生图：先对用户原始输入进行扩写（在参数拼接前）
-                expanded_prompt = _expand_simple_prompt(prompt)
-                if expanded_prompt != prompt:
-                    logger.info("【扩写后】: %s", expanded_prompt)
-                prompt_with_subject = _ensure_carpet_subject(expanded_prompt)
-                prompt_attempt = _build_enhanced_prompt(
-                    prompt_with_subject,
-                    style,
-                    ratio,
-                    color,
-                    scene,
-                    apply_flat_template=True,
+                if i == 0:
+                    assistant_confirm = confirm
+                # 重置文件指针以便下次读取
+                if hasattr(file, 'file') and hasattr(file.file, 'seek'):
+                    file.file.seek(0)
+                    
+            elif reference_url:
+                if i == 0:
+                    prompt_attempt = edit_prompt
+                    logger.info("【增强提示词】: %s", prompt_attempt)
+                    logger.info("【模式】: 图生图 (URL引用)")
+                results, confirm = _image_to_image_from_url(
+                    reference_url,
+                    edit_prompt,
+                    None,
+                    size,
+                    preserve_reference_ratio=preserve_reference_ratio,
                 )
-                logger.info("【增强提示词】: %s", prompt_attempt)
-                logger.info("【模式】: 文生图 (上下文推断)")
-                flat_mode = _is_default_scene(scene) and (not _wants_perspective_or_scene(prompt_with_subject or ""))
-                if flat_mode and bool(getattr(settings, "GENERATE_FLAT_QC_ENABLED", True)):
-                    results, assistant_confirm = _text_to_image_flat_stable(request, prompt_attempt, size)
-                else:
-                    results, assistant_confirm = _text_to_image(
+                if i == 0:
+                    assistant_confirm = confirm
+            else:
+                inferred = _infer_generate_action(edit_prompt, context)
+                if inferred["action"] == "image_to_image" and inferred.get("reference_url"):
+                    ratio_only_from_text, ratio_val = _is_ratio_only_prompt(edit_prompt)
+                    if ratio_only_from_text and ratio_val:
+                        prompt_attempt = _apply_ratio_fill_instruction(ratio_val, edit_prompt)
+                    else:
+                        prompt_attempt = edit_prompt
+                    if i == 0:
+                        logger.info("【增强提示词】: %s", prompt_attempt)
+                        logger.info("【模式】: 图生图 (上下文推断) | reference_url=%s", inferred.get("reference_url"))
+                    results, confirm = _image_to_image_from_url(
+                        inferred["reference_url"],
                         prompt_attempt,
                         None,
                         size,
+                        preserve_reference_ratio=preserve_reference_ratio,
                     )
+                    if i == 0:
+                        assistant_confirm = confirm
+                else:
+                    # 文生图：先对用户原始输入进行扩写（在参数拼接前）
+                    expanded_prompt = _expand_simple_prompt(cleaned_prompt)
+                    if expanded_prompt != cleaned_prompt and i == 0:
+                        logger.info("【扩写后】: %s", expanded_prompt)
+                    prompt_with_subject = _ensure_carpet_subject(expanded_prompt)
+                    prompt_attempt = _build_enhanced_prompt(
+                        prompt_with_subject,
+                        style,
+                        ratio,
+                        color,
+                        scene,
+                        apply_flat_template=True,
+                    )
+                    if i == 0:
+                        logger.info("【增强提示词】: %s", prompt_attempt)
+                        logger.info("【模式】: 文生图 (上下文推断)")
+                    flat_mode = _is_default_scene(scene) and (not _wants_perspective_or_scene(prompt_with_subject or ""))
+                    if flat_mode and bool(getattr(settings, "GENERATE_FLAT_QC_ENABLED", True)):
+                        results, confirm = _text_to_image_flat_stable(request, prompt_attempt, size)
+                    else:
+                        results, confirm = _text_to_image(
+                            prompt_attempt,
+                            None,
+                            size,
+                        )
+                    if i == 0:
+                        assistant_confirm = confirm
+            
+            all_results.extend(results)
 
-        logger.info("【生成成功】: %s", results)
+        logger.info("【生成成功】: 共 %d 张图片", len(all_results))
         logger.info("=" * 70)
-        return GenerateResponse(results=results, assistant_confirm=assistant_confirm)
+        return GenerateResponse(results=all_results, assistant_confirm=assistant_confirm)
 
     except Exception as e:
         logger.exception("【图像生成失败】")
@@ -945,5 +1036,61 @@ def _get_error_detail(error_message: str) -> str:
             "或调整/关闭 Safe Experience Mode 后再试。"
         )
     if status_code == 403:
+        if ("AccountOverdueError" in error_message) or ("overdue" in error_message.lower()):
+            return "图像生成失败：火山引擎账号当前存在欠费（AccountOverdueError），请先在火山控制台完成充值/结清后重试。"
         return "图像生成失败：当前账号额度/配额不足，请检查控制台配额后再试。"
     return f"图像生成失败: {error_message}"
+
+
+# ==================== 套色服务 API ====================
+
+class ColorVariantRequest(BaseModel):
+    """套色请求参数"""
+    image_base64: str  # Base64 编码的图片
+    count: int = 2  # 生成数量 2-10
+    color_scheme: list[str] | None = None  # 色系列表，如 ["红色", "蓝色"]
+
+
+@router.post("/color-variants")
+async def generate_color_variants(request: ColorVariantRequest):
+    """
+    套色服务：根据原图生成多张配色不同但内容一致的图片
+    
+    使用火山引擎的 sequential_image_generation 功能。
+    
+    Args:
+        request: 包含图片和套色参数的请求
+        
+    Returns:
+        生成的图片URL列表
+    """
+    from app.service.color_variant_service import color_variant_service
+    
+    try:
+        # 验证参数
+        count = max(2, min(10, request.count))
+        
+        logger.info(f"[ColorVariants] 收到套色请求, count={count}, colors={request.color_scheme}")
+        
+        # 调用套色服务 - 直接传递 base64 数据
+        urls = color_variant_service.generate_variants(
+            image_path_or_base64=request.image_base64,
+            count=count,
+            color_scheme=request.color_scheme,
+            size="2K",
+        )
+        
+        logger.info(f"[ColorVariants] 套色成功, 生成 {len(urls)} 张图片")
+        
+        return {
+            "success": True,
+            "urls": urls,
+            "count": len(urls),
+        }
+            
+    except Exception as e:
+        logger.exception("套色生成失败")
+        error_msg = str(e)
+        status_code = _get_error_status_code(error_msg)
+        detail = _get_error_detail(error_msg)
+        raise HTTPException(status_code=status_code, detail=detail)

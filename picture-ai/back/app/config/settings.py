@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     API_KEY: str = "sk-3fab2e04b2104c05894ead0ca1e4cab1"
     
     # 火山引擎 (Volcengine)
-    VOLC_API_KEY: str = "076f3484-2138-4fe1-bb65-5450d3309ab8"
+    VOLC_API_KEY: str = "61b8c9ea-8205-4207-85e9-eeb742212ac2"
 
     # ==================== 模型配置 ====================
     # Embedding 模型
@@ -77,9 +77,24 @@ class Settings(BaseSettings):
     SAM_MODEL_TYPE: str = "vit_b"
     SAM_DEVICE: str = "auto"  # "auto" / "cuda" / "cpu"
 
+    # ==================== Qwen-Image-Layered 配置 ====================
+    QWEN_IMAGE_LAYERED_API_BASE: str = "https://api.302.ai"
+    QWEN_IMAGE_LAYERED_SUBMIT_ENDPOINT: str = "/302/submit/qwen-image-layered"
+    QWEN_IMAGE_LAYERED_RESULT_ENDPOINT: str = "/302/result/qwen-image-layered"
+    QWEN_IMAGE_LAYERED_API_KEY: str = "sk-s47wpiDP8Nt10Jf7A6LK0vlsE4p9cebwZHbLxZx96p19cVnY"
+    QWEN_IMAGE_LAYERED_NUM_LAYERS: int = 4
+    QWEN_IMAGE_LAYERED_TEST_IMAGE_URL: str = ""
+
+    QWEN_IMAGE_LAYERED_ENABLE_SAFETY_CHECKER: bool = True
+    QWEN_IMAGE_LAYERED_OUTPUT_FORMAT: str = "png"
+    QWEN_IMAGE_LAYERED_REQUEST_TIMEOUT_SECONDS: int = 180
+    QWEN_IMAGE_LAYERED_POLL_INTERVAL_SECONDS: float = 2.0
+    QWEN_IMAGE_LAYERED_POLL_MAX_SECONDS: int = 180
+
     # ==================== 服务配置 ====================
     BACKEND_PUBLIC_URL: str = "http://127.0.0.1:8000"
     DEBUG: bool = True
+
 
     # ==================== Pydantic 配置 ====================
     model_config = SettingsConfigDict(

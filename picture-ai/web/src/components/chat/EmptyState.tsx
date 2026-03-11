@@ -2,7 +2,7 @@
 import { ThunderboltOutlined } from '@ant-design/icons';
 
 export const EmptyState: React.FC = () => (
-    <div className="h-full flex flex-col justify-center items-center text-[var(--color-text-secondary)] gap-8 select-none relative overflow-hidden">
+    <div className="w-full h-full flex flex-col justify-center items-center text-[var(--color-text-secondary)] gap-8 select-none relative overflow-hidden">
 
         {/* Background Glow - Breathing */}
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
