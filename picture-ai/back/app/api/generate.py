@@ -1077,7 +1077,7 @@ async def generate_color_variants(request: ColorVariantRequest):
             image_path_or_base64=request.image_base64,
             count=count,
             color_scheme=request.color_scheme,
-            size="2K",
+            size="original",
         )
         
         logger.info(f"[ColorVariants] 套色成功, 生成 {len(urls)} 张图片")

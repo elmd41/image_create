@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Button, Tooltip } from "@heroui/react";
-import { LinkOutlined, ReloadOutlined, DownloadOutlined, BgColorsOutlined, ScissorOutlined, FormatPainterOutlined, CopyOutlined } from '@ant-design/icons';
+import { LinkOutlined, ReloadOutlined, DownloadOutlined, ScissorOutlined, FormatPainterOutlined, CopyOutlined } from '@ant-design/icons';
 import { message } from 'antd';
 import { Message } from '../../types';
 import { PARAM_LABELS, DEFAULT_SCENE_VALUE } from '../../constants';
@@ -213,20 +213,17 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                                 </Tooltip>
                             )}
                         </div>
-                        {/* 图片网格 - 保持原尺寸，从左到右排列，间隙均匀 */}
-                        <div className="grid gap-3" style={{ 
-                            gridTemplateColumns: `repeat(auto-fill, minmax(160px, 1fr))`,
-                            justifyItems: 'center'
-                        }}>
+                        {/* 图片网格 - 保持宽高比，均匀平衡排列，无边框 */}
+                        <div className="flex flex-wrap gap-3 justify-center md:justify-start">
                             {images.map((imgUrl, idx) => (
                                 <div 
                                     key={idx} 
-                                    className="relative rounded-xl overflow-hidden border border-white/10 group/gridimg cursor-pointer bg-black/20"
+                                    className="relative rounded-xl overflow-hidden group/gridimg cursor-pointer w-[min(260px,100%)]"
                                 >
                                     <img 
                                         src={imgUrl} 
                                         alt={`套色 ${idx + 1}`} 
-                                        className="w-full h-auto object-contain" 
+                                        className="w-full h-auto object-contain max-h-[280px] rounded-xl" 
                                         onClick={() => onPreview(imgUrl)}
                                         onLoad={onImageLoad}
                                     />

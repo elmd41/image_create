@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Button, Textarea, Tooltip, Spinner, Chip } from "@heroui/react";
-import { message } from 'antd';
+import { message, Modal } from 'antd';
 import { Upload } from "antd";
 
 import {
@@ -13,6 +13,7 @@ import {
     EyeOutlined,
     EyeInvisibleOutlined,
     DeleteOutlined,
+    LogoutOutlined,
 } from '@ant-design/icons';
 
 import { EditModeState } from '../../types';
@@ -88,6 +89,7 @@ export const EditMode: React.FC<EditModeProps> = ({
     });
     const [previewError, setPreviewError] = useState<string | null>(null);
     const [converting, setConverting] = useState(false);
+    const [showExitModal, setShowExitModal] = useState(false);
 
     // 处理图片选择 - 使用图片格式转换工具
     const handleFileSelect = async (file: File) => {
@@ -256,7 +258,7 @@ export const EditMode: React.FC<EditModeProps> = ({
             </div >
 
             {/* Sidebar - Dark Theme */}
-            <div className="w-[280px] flex flex-col gap-4 bg-[#181920]/95 backdrop-blur-xl p-4 rounded-2xl shadow-2xl border border-white/10 overflow-y-auto shrink-0">
+            <div className="w-[380px] flex flex-col gap-4 bg-[#181920]/95 backdrop-blur-xl p-4 rounded-2xl shadow-2xl border border-white/10 overflow-y-auto shrink-0">
 
                 {/* Layer Panel */}
                 <div className="flex flex-col gap-2">
@@ -445,6 +447,16 @@ export const EditMode: React.FC<EditModeProps> = ({
                                 引用：加入对话
                             </Button>
                         </Tooltip>
+                        <Tooltip content="退出编辑模式">
+                            <Button
+                                startContent={<LogoutOutlined />}
+                                variant="flat"
+                                className="col-span-2 bg-red-500/10 text-red-400 hover:bg-red-500/20"
+                                onPress={() => setShowExitModal(true)}
+                            >
+                                退出编辑
+                            </Button>
+                        </Tooltip>
                     </div>
                 </div>
 
@@ -461,6 +473,31 @@ export const EditMode: React.FC<EditModeProps> = ({
                     )
                 }
             </div>
+
+            {/* 退出编辑确认弹窗 */}
+            <Modal
+                title="确认退出"
+                open={showExitModal}
+                onOk={() => {
+                    setShowExitModal(false);
+                    setEditMode(prev => ({
+                        ...prev,
+                        active: false,
+                        currentImageDataUrl: null,
+                        layers: [],
+                        historyStack: [],
+                        futureStack: [],
+                        initialSnapshot: null,
+                    }));
+                    clearPendingFile();
+                }}
+                onCancel={() => setShowExitModal(false)}
+                okText="确认退出"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+            >
+                <p>退出编辑后将清除所有数据，确定要退出吗？</p>
+            </Modal>
         </div>
     );
 };

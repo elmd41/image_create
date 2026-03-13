@@ -39,6 +39,9 @@ from app.service.session.session_store import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+MAX_DIMENSION = 2048
+MAX_FILE_SIZE = 4 * 1024 * 1024  # 4MB
+
 
 def _mask_to_thumbnail_base64(image_bgr: np.ndarray, mask: np.ndarray) -> str:
     if image_bgr is None or mask is None:
@@ -97,6 +100,54 @@ class LayersResponse(BaseModel):
     layers: list[LayerItem]
 
 
+def _prepare_layered_image_data_url(pil_img: Image.Image) -> tuple[Image.Image, str]:
+    """将图片压缩为分层接口可接受的 data URL（尽量保留尺寸与细节）。"""
+    if pil_img.mode != "RGB":
+        pil_img = pil_img.convert("RGB")
+
+    w, h = pil_img.size
+    if w > MAX_DIMENSION or h > MAX_DIMENSION:
+        scale = min(MAX_DIMENSION / w, MAX_DIMENSION / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        logger.info("【interactive/upload】Image resized to %dx%d", new_w, new_h)
+
+    # 优先尝试 PNG（无损）
+    image_url = pil_to_data_url(pil_img, "PNG")
+    if len(image_url.encode("utf-8")) <= MAX_FILE_SIZE:
+        return pil_img, image_url
+
+    # 超限后尝试 JPEG + 多轮降质/降采样
+    work_img = pil_img
+    for quality in [90, 82, 74, 66, 58, 50]:
+        image_url = pil_to_data_url(work_img, "JPEG", quality=quality)
+        if len(image_url.encode("utf-8")) <= MAX_FILE_SIZE:
+            logger.info("【interactive/upload】Use JPEG quality=%d", quality)
+            return work_img, image_url
+
+    for _ in range(5):
+        w, h = work_img.size
+        if w <= 768 or h <= 768:
+            break
+        new_w = max(768, int(w * 0.85))
+        new_h = max(768, int(h * 0.85))
+        work_img = work_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        for quality in [72, 64, 56, 50, 45]:
+            image_url = pil_to_data_url(work_img, "JPEG", quality=quality)
+            if len(image_url.encode("utf-8")) <= MAX_FILE_SIZE:
+                logger.info(
+                    "【interactive/upload】Use resized JPEG %dx%d quality=%d",
+                    new_w,
+                    new_h,
+                    quality,
+                )
+                return work_img, image_url
+
+    # 最后兜底：返回当前最小结果
+    image_url = pil_to_data_url(work_img, "JPEG", quality=45)
+    return work_img, image_url
+
+
 @router.get("/interactive/ping")
 async def interactive_ping() -> dict:
     return {"ok": True}
@@ -117,33 +168,19 @@ async def interactive_upload(
         logger.warning("Image decode failed: %s", e)
         raise HTTPException(status_code=400, detail=f"图片解析失败: {e}") from e
 
+    pil_img, image_url = _prepare_layered_image_data_url(pil_img)
     w, h = pil_img.size
-    
-    # 如果图片太大，压缩到合理尺寸（API 限制）
-    MAX_DIMENSION = 2048
-    MAX_FILE_SIZE = 4 * 1024 * 1024  # 4MB
-    
-    if w > MAX_DIMENSION or h > MAX_DIMENSION:
-        scale = min(MAX_DIMENSION / w, MAX_DIMENSION / h)
-        new_w, new_h = int(w * scale), int(h * scale)
-        pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        w, h = new_w, new_h
-        logger.info("【interactive/upload】Image resized to %dx%d", w, h)
     
     rgb = np.asarray(pil_img, dtype=np.uint8)
     bgr = rgb[:, :, ::-1].copy()
 
     try:
-        # 尝试使用 JPEG 格式如果 PNG 太大
-        image_url = pil_to_data_url(pil_img, "PNG")
-        if len(image_url) > MAX_FILE_SIZE:
-            logger.info("【interactive/upload】PNG too large (%d bytes), trying JPEG", len(image_url))
-            image_url = pil_to_data_url(pil_img, "JPEG", quality=85)
-            
         qwen_result, layer_urls = await submit_and_poll_layered(image_url=image_url, num_layers=layer_count)
         masks = await load_layer_masks(layer_urls, target_size=(w, h))
     except HTTPStatusError as e:
         logger.exception("【interactive/upload】Qwen API error: %s", e)
+        if e.response.status_code == 401:
+            raise HTTPException(status_code=503, detail="分层服务授权失败，API密钥可能已过期，请联系管理员") from e
         if e.response.status_code == 500:
             raise HTTPException(status_code=503, detail="分层服务暂时不可用，请稍后重试") from e
         raise HTTPException(status_code=400, detail=f"分层API调用失败: {e}") from e

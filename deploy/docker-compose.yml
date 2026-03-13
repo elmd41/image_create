@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # MySQL 数据库
+  mysql:
+    image: mysql:8.0
+    container_name: picture-ai-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: picture_ai
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-db:/docker-entrypoint-initdb.d
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    networks:
+      - picture-ai-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 后端服务
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: picture-ai-backend
+    restart: always
+    environment:
+      - DB_TYPE=mysql
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=rootpassword
+      - MYSQL_DATABASE=picture_ai
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - VOLC_API_KEY=${VOLC_API_KEY}
+      - QWEN_IMAGE_LAYERED_API_KEY=${QWEN_IMAGE_LAYERED_API_KEY}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../picture-ai/data:/app/data
+      - ../picture-ai/back/models:/app/back/models
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - picture-ai-network
+
+  # 前端服务（Nginx）
+  frontend:
+    image: nginx:alpine
+    container_name: picture-ai-nginx
+    restart: always
+    ports:
+      - "8023:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../picture-ai/web/dist:/usr/share/nginx/html:ro
+      - ../picture-ai/data/generated:/usr/share/nginx/html/generated:ro
+    depends_on:
+      - backend
+    networks:
+      - picture-ai-network
+
+networks:
+  picture-ai-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+    driver: local

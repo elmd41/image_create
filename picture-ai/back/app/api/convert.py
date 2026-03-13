@@ -12,8 +12,8 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/convert", tags=["图片转换"])
 
-MAX_DIMENSION = 2048
-MAX_FILE_SIZE = 4 * 1024 * 1024  # 4MB
+MAX_DIMENSION = 4096  # 增大到 4K 以支持高清地毯图
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB - 支持更大的地毯图
 
 
 @router.post("/image", summary="转换图片格式")

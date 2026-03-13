@@ -7,6 +7,7 @@ import {
     PopoverContent,
     Tooltip
 } from "@heroui/react";
+import { message } from 'antd';
 import {
     PictureOutlined,
     CloseOutlined,
@@ -15,7 +16,8 @@ import {
     ColumnWidthOutlined,
     EnvironmentOutlined,
     SearchOutlined,
-    StopOutlined
+    StopOutlined,
+    LoadingOutlined
 } from '@ant-design/icons';
 import { UploadFile } from 'antd/es/upload/interface';
 import { RgbPalettePicker } from '../shared/RgbPalettePicker';
@@ -28,6 +30,7 @@ import {
     PARAM_LABELS
 } from '../../constants';
 import { GenerateParams } from '../../types';
+import { convertImageFile } from '../../utils/imageConverter';
 
 interface InputAreaProps {
     inputText: string;
@@ -69,6 +72,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
     const [sceneOpen, setSceneOpen] = useState(false);
     const [styleOpen, setStyleOpen] = useState(false);
     const [ratioOpen, setRatioOpen] = useState(false);
+    const [imageConverting, setImageConverting] = useState(false);
     // Controlled popovers for inline param chip editing
     const [editingParam, setEditingParam] = useState<keyof GenerateParams | null>(null);
 
@@ -83,12 +87,36 @@ export const InputArea: React.FC<InputAreaProps> = ({
     const isSearchEnabled = !loading && (hasImage || hasText);
     const isGenerateEnabled = !loading && (hasText || hasParams);
 
-    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
             const file = e.target.files[0];
-            if (!file.type.startsWith('image/')) return;
+            if (!file.type.startsWith('image/') && !file.name.match(/\.(tiff?|bmp|heic|heif|psd)$/i)) return;
+            
             const uid = `${Date.now()}`;
-            setFileList([{ uid, name: file.name, status: 'done', url: URL.createObjectURL(file), originFileObj: file as any }]);
+            setImageConverting(true);
+            
+            try {
+                // 使用图片格式转换工具处理图片
+                const result = await convertImageFile(file);
+                setFileList([{ 
+                    uid, 
+                    name: result.file.name, 
+                    status: 'done', 
+                    url: result.previewUrl, 
+                    originFileObj: result.file as any 
+                }]);
+                
+                if (result.converted && result.message) {
+                    message.info(result.message);
+                }
+            } catch (error) {
+                console.error('图片处理失败:', error);
+                message.error(error instanceof Error ? error.message : '图片处理失败');
+                // 尝试直接使用原文件
+                setFileList([{ uid, name: file.name, status: 'done', url: URL.createObjectURL(file), originFileObj: file as any }]);
+            } finally {
+                setImageConverting(false);
+            }
         }
         // 重置input value，允许重复选择同一文件
         e.target.value = '';
@@ -175,13 +203,13 @@ export const InputArea: React.FC<InputAreaProps> = ({
                     {/* 主输入行：上传图标 | 输入框(含chips) | 停止/生成/搜索 */}
                     <div className="flex items-center gap-2">
                         {/* 上传按钮 - 左侧 */}
-                        <Tooltip content="上传参考图" delay={400} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
+                        <Tooltip content={imageConverting ? "处理中..." : "上传参考图"} delay={400} closeDelay={0} classNames={{ content: 'text-xs px-2 py-1 bg-[#222] text-white rounded-lg' }}>
                             <div className="relative shrink-0">
-                                <input type="file" accept="image/*"
+                                <input type="file" accept="image/*,.tiff,.tif,.bmp,.heic,.heif,.psd"
                                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
-                                    onChange={handleFileChange} disabled={loading || isInputLocked} />
-                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all ${hasImage ? 'text-cyan-400' : 'text-white/40 hover:text-white/70'}`}>
-                                    <PictureOutlined style={{ fontSize: 24 }} />
+                                    onChange={handleFileChange} disabled={loading || isInputLocked || imageConverting} />
+                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all ${imageConverting ? 'text-cyan-400 animate-pulse' : hasImage ? 'text-cyan-400' : 'text-white/40 hover:text-white/70'}`}>
+                                    {imageConverting ? <LoadingOutlined style={{ fontSize: 24 }} /> : <PictureOutlined style={{ fontSize: 24 }} />}
                                 </div>
                             </div>
                         </Tooltip>

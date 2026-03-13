@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Button, Tooltip } from "@heroui/react";
 import { PlusOutlined, DeleteOutlined, MessageOutlined } from '@ant-design/icons';
 
@@ -43,6 +43,28 @@ export const ChatHistoryPanel: React.FC<ChatHistoryPanelProps> = ({
     onDeleteSession,
 }) => {
     const [isHovered, setIsHovered] = useState(false);
+    const hoverTimerRef = useRef<number | null>(null);
+
+    const clearHoverTimer = () => {
+        if (hoverTimerRef.current !== null) {
+            window.clearTimeout(hoverTimerRef.current);
+            hoverTimerRef.current = null;
+        }
+    };
+
+    const handleMouseEnter = () => {
+        clearHoverTimer();
+        hoverTimerRef.current = window.setTimeout(() => setIsHovered(true), 70);
+    };
+
+    const handleMouseLeave = () => {
+        clearHoverTimer();
+        hoverTimerRef.current = window.setTimeout(() => setIsHovered(false), 110);
+    };
+
+    useEffect(() => {
+        return () => clearHoverTimer();
+    }, []);
 
     return (
         <div
@@ -52,12 +74,12 @@ export const ChatHistoryPanel: React.FC<ChatHistoryPanelProps> = ({
                 rounded-2xl shadow-2xl
                 border border-white/10
                 flex flex-col
-                transition-all duration-300 ease-in-out
+                transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]
                 overflow-hidden
                 ${isHovered ? 'w-56' : 'w-[72px]'}
             `}
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
         >
             {/* 新建按钮区域 */}
             <div className="px-2 py-3 border-b border-white/10 flex-shrink-0 flex justify-center">

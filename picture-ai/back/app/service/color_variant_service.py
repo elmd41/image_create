@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -26,11 +27,14 @@ class ColorVariantService:
     """套色服务 - 单张图生成多张不同配色的图片"""
 
     @staticmethod
-    def _normalize_size(size: str) -> str:
-        """规范化尺寸参数，确保满足最小像素要求"""
-        import math
-        
+    def _normalize_size(size: str, original_size: tuple[int, int] | None = None) -> str:
+        """规范化尺寸参数：默认保持原图尺寸，不强制拉伸为正方形。"""
         raw = (size or "").strip().lower().replace("*", "x")
+
+        if raw in ("", "original", "source", "same"):
+            if original_size and original_size[0] > 0 and original_size[1] > 0:
+                return f"{int(original_size[0])}x{int(original_size[1])}"
+            return "1024x1024"
         
         # 关键字尺寸
         if raw in ("1k", "1024"):
@@ -46,29 +50,57 @@ class ColorVariantService:
                 if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
                     w, h = int(parts[0].strip()), int(parts[1].strip())
                 else:
-                    w, h = 1920, 1920
+                    if original_size:
+                        w, h = original_size
+                    else:
+                        w, h = 1024, 1024
             else:
-                w, h = 1920, 1920
+                if original_size:
+                    w, h = original_size
+                else:
+                    w, h = 1024, 1024
         
         w = max(1, int(w))
         h = max(1, int(h))
-        
-        # 最小像素要求: 3686400 (1920x1920)
-        min_pixels = 3686400
-        align = 64
-        
-        area = w * h
-        if area < min_pixels:
-            scale = math.sqrt(min_pixels / float(area))
-            w = int(math.ceil(w * scale))
-            h = int(math.ceil(h * scale))
-        
-        # 对齐到 64
-        if align > 1:
-            w = int(math.ceil(w / align) * align)
-            h = int(math.ceil(h / align) * align)
-        
+
         return f"{w}x{h}"
+
+    @staticmethod
+    def _get_size_from_data_url(data_url: str) -> tuple[int, int] | None:
+        """从 data URL 中解析原图尺寸。"""
+        try:
+            if "," not in data_url:
+                return None
+            b64 = data_url.split(",", 1)[1]
+            data = base64.b64decode(b64)
+            from PIL import Image
+
+            with Image.open(io.BytesIO(data)) as img:
+                return int(img.width), int(img.height)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _get_size_from_base64(raw_base64: str) -> tuple[int, int] | None:
+        """从纯 base64 字符串解析尺寸。"""
+        try:
+            data = base64.b64decode(raw_base64)
+            from PIL import Image
+
+            with Image.open(io.BytesIO(data)) as img:
+                return int(img.width), int(img.height)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _get_size_from_file(image_path: str) -> tuple[int, int] | None:
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as img:
+                return int(img.width), int(img.height)
+        except Exception:
+            return None
 
     @staticmethod
     def _image_to_base64_data_url(image_path: str) -> str:
@@ -113,7 +145,7 @@ class ColorVariantService:
         image_path_or_base64: str,
         count: int = 2,
         color_scheme: list[str] | None = None,
-        size: str = "2K",
+        size: str = "original",
     ) -> list[str]:
         """
         生成套色图片
@@ -136,10 +168,12 @@ class ColorVariantService:
         
         # 准备图片输入
         tmp_path: str | None = None
+        original_size: tuple[int, int] | None = None
         try:
             if image_path_or_base64.startswith("data:"):
                 # 已经是 data URL
                 image_input = image_path_or_base64
+                original_size = self._get_size_from_data_url(image_input)
             elif image_path_or_base64.startswith(("http://", "https://")):
                 # URL - 需要下载后转为 base64
                 timeout_s = 60
@@ -151,16 +185,36 @@ class ColorVariantService:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp_path = tmp.name
                     tmp.write(resp.content)
+                original_size = self._get_size_from_file(tmp_path)
                 
                 image_input = self._image_to_base64_data_url(tmp_path)
             elif os.path.exists(image_path_or_base64):
                 # 本地文件路径
+                original_size = self._get_size_from_file(image_path_or_base64)
                 image_input = self._image_to_base64_data_url(image_path_or_base64)
             else:
                 # 假设是纯 base64 字符串
+                original_size = self._get_size_from_base64(image_path_or_base64)
                 image_input = f"data:image/png;base64,{image_path_or_base64}"
             
             # 构建提示词
+            # 计算宽高比
+            aspect_ratio = "1:1"
+            if original_size:
+                w, h = original_size
+                # 计算最简宽高比
+                from math import gcd
+                g = gcd(w, h)
+                ratio_w, ratio_h = w // g, h // g
+                # 简化比例（避免太复杂的比例）
+                if ratio_w > 10 or ratio_h > 10:
+                    if w > h:
+                        aspect_ratio = f"{round(w/h, 2)}:1"
+                    else:
+                        aspect_ratio = f"1:{round(h/w, 2)}"
+                else:
+                    aspect_ratio = f"{ratio_w}:{ratio_h}"
+            
             if color_scheme and len(color_scheme) > 0:
                 colors_str = "、".join(color_scheme)
                 # 计算每个颜色大约分配多少张图
@@ -178,21 +232,21 @@ class ColorVariantService:
                 distribution_str = "，".join(color_distribution)
                 
                 prompt = (
-                    f"【套色任务】根据这张图片，生成{count}张配色变体。"
+                    f"【套色任务 - 严格保持原图宽高比 {aspect_ratio}】根据这张图片，生成{count}张配色变体。"
                     f"【颜色限制】只允许使用以下颜色：{colors_str}。具体分配：{distribution_str}。"
                     f"每张图只能是这些指定颜色中的一种，禁止出现其他颜色。"
                     f"同一颜色系内，请使用该颜色不同的色号/色差来区分。"
-                    f"【强制要求】必须保持原图的尺寸、大小、结构、图案、元素位置完全一致，只改变颜色。输出图片的宽高比和分辨率必须与原图相同。"
+                    f"【强制要求】必须严格保持原图的宽高比({aspect_ratio})、结构、图案、元素位置完全一致，只改变颜色。禁止裁剪、拉伸或改变图片形状。"
                 )
             else:
                 prompt = (
-                    f"【套色任务】根据这张图片，生成{count}张配色不同的变体。"
+                    f"【套色任务 - 严格保持原图宽高比 {aspect_ratio}】根据这张图片，生成{count}张配色不同的变体。"
                     f"每张图使用完全不同的色系（如红色系、蓝色系、绿色系、紫色系、橙色系、青色系等），让{count}张图的颜色尽量丰富多样。"
-                    f"【强制要求】必须保持原图的尺寸、大小、结构、图案、元素位置完全一致，只改变颜色。输出图片的宽高比和分辨率必须与原图相同。"
+                    f"【强制要求】必须严格保持原图的宽高比({aspect_ratio})、结构、图案、元素位置完全一致，只改变颜色。禁止裁剪、拉伸或改变图片形状。"
                 )
             
             # 规范化尺寸 - 必须至少 3686400 像素
-            normalized_size = self._normalize_size(size)
+            normalized_size = self._normalize_size(size, original_size)
             
             # 构建请求
             payload = {
@@ -216,7 +270,9 @@ class ColorVariantService:
             
             timeout_s = int(getattr(settings, "VOLC_REQUEST_TIMEOUT_SECONDS", 180))
             
-            logger.info(f"[ColorVariant] 发送套色请求, count={count}, size={size}")
+            logger.info(
+                f"[ColorVariant] 发送套色请求, count={count}, size={normalized_size}, original_size={original_size}"
+            )
             logger.debug(f"[ColorVariant] Prompt: {prompt}")
             
             # 发送流式请求

@@ -45,13 +45,13 @@ class Settings(BaseSettings):
     # ==================== 数据库配置 ====================
     # 支持 SQLite 和 MySQL
     # DB_TYPE: sqlite 或 mysql
-    DB_TYPE: str = "sqlite"
+    DB_TYPE: str = "sqlite"  # 本地开发使用 SQLite
     
     # SQLite 配置
     DATABASE_URL: str = f"sqlite:///{_DATA_DIR / 'picture_ai.db'}"
     
     # MySQL 配置（生产环境使用）
-    MYSQL_HOST: str = "127.0.0.1"
+    MYSQL_HOST: str = "mysql"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
     MYSQL_PASSWORD: str = "rootpassword"
@@ -112,9 +112,9 @@ class Settings(BaseSettings):
 
     # ==================== 服务配置 ====================
     # 生产环境设置为实际域名
-    BACKEND_PUBLIC_URL: str = "http://127.0.0.1:8000"
+    BACKEND_PUBLIC_URL: str = "http://pic.deluagent.com"
     PRODUCTION_URL: str = "http://pic.deluagent.com"
-    DEBUG: bool = True
+    DEBUG: bool = False
 
 
     # ==================== Pydantic 配置 ====================

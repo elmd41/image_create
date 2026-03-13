@@ -170,10 +170,18 @@ const App: React.FC = () => {
   // --- Per-Session Input State Cache ---
   // 每个会话独立的输入框状态缓存
   const sessionInputCacheRef = useRef<Map<string, { inputText: string; fileList: UploadFile[] }>>(new Map());
+  // 每个会话独立的消息缓存，切换时优先秒开
+  const sessionMessagesCacheRef = useRef<Map<string, Message[]>>(new Map());
+  const sessionFetchControllerRef = useRef<AbortController | null>(null);
+  const currentChatSessionIdRef = useRef<string | null>(null);
 
   // --- Chat Session Management ---
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSessionId, setCurrentChatSessionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    currentChatSessionIdRef.current = currentChatSessionId;
+  }, [currentChatSessionId]);
 
   // --- Generate Params ---
   const [generateParams, setGenerateParams] = useState<GenerateParams>({
@@ -239,9 +247,17 @@ const App: React.FC = () => {
   }, []);
 
   const addMessage = useCallback((msg: Message, overrideSessionId?: string) => {
-    setChatHistory((prev) => [...prev, msg]);
     // Update session metadata & persist to database
     const sessionId = overrideSessionId || currentChatSessionId;
+
+    setChatHistory((prev) => {
+      const next = [...prev, msg];
+      if (sessionId) {
+        sessionMessagesCacheRef.current.set(sessionId, next);
+      }
+      return next;
+    });
+
     if (sessionId) {
       // Update local state - 先立即更新基本信息
       setChatSessions(prev => prev.map(s => {
@@ -352,6 +368,7 @@ const App: React.FC = () => {
       // 保存当前会话的输入状态
       if (currentChatSessionId) {
         sessionInputCacheRef.current.set(currentChatSessionId, { inputText, fileList });
+        sessionMessagesCacheRef.current.set(currentChatSessionId, chatHistory);
       }
       
       const session = await createChatSession({ title: '' });
@@ -367,6 +384,7 @@ const App: React.FC = () => {
       setChatSessions(prev => [newSession, ...prev]);
       setCurrentChatSessionId(newSession.id);
       setChatHistory([]);
+      sessionMessagesCacheRef.current.set(newSession.id, []);
       // 新会话输入框清空
       setInputText('');
       setFileList([]);
@@ -374,7 +392,7 @@ const App: React.FC = () => {
       console.error('Failed to create chat session:', err);
       message.error('创建会话失败');
     }
-  }, [currentChatSessionId, inputText, fileList]);
+  }, [currentChatSessionId, inputText, fileList, chatHistory]);
 
   const handleSelectChatSession = useCallback(async (sessionId: string) => {
     // 如果选择的是当前会话，不做任何操作
@@ -383,6 +401,7 @@ const App: React.FC = () => {
     // 保存当前会话的输入状态
     if (currentChatSessionId) {
       sessionInputCacheRef.current.set(currentChatSessionId, { inputText, fileList });
+      sessionMessagesCacheRef.current.set(currentChatSessionId, chatHistory);
     }
     
     setCurrentChatSessionId(sessionId);
@@ -398,9 +417,22 @@ const App: React.FC = () => {
       setFileList([]);
     }
     
+    // 优先命中本地缓存，减少切换延迟
+    const cachedMessages = sessionMessagesCacheRef.current.get(sessionId);
+    if (cachedMessages) {
+      setChatHistory(cachedMessages);
+    } else {
+      setChatHistory([]);
+    }
+
+    // 取消上一条会话消息请求，避免慢请求覆盖新会话
+    sessionFetchControllerRef.current?.abort();
+    const sessionController = new AbortController();
+    sessionFetchControllerRef.current = sessionController;
+
     // Load messages from database
     try {
-      const messages = await getChatMessages(sessionId);
+      const messages = await getChatMessages(sessionId, sessionController.signal);
       const loadedHistory: Message[] = messages.map(m => ({
         type: (m.type as Message['type']) || 'text',
         content: m.content,
@@ -413,18 +445,29 @@ const App: React.FC = () => {
         colorVariantConfig: m.colorVariantConfig || undefined,
         isUser: m.isUser,
       }));
-      setChatHistory(loadedHistory);
+      sessionMessagesCacheRef.current.set(sessionId, loadedHistory);
+
+      // 仅在当前仍停留该会话时更新 UI，避免错位刷新
+      if (currentChatSessionIdRef.current === sessionId) {
+        setChatHistory(loadedHistory);
+      }
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
       console.error('Failed to load chat messages:', err);
-      setChatHistory([]);
+      if (!cachedMessages) {
+        setChatHistory([]);
+      }
     }
-  }, [currentChatSessionId, inputText, fileList]);
+  }, [currentChatSessionId, inputText, fileList, chatHistory]);
 
   const handleDeleteChatSession = useCallback(async (sessionId: string) => {
     try {
       await apiDeleteChatSession(sessionId);
       // 清理该会话的输入状态缓存
       sessionInputCacheRef.current.delete(sessionId);
+      sessionMessagesCacheRef.current.delete(sessionId);
       setChatSessions(prev => prev.filter(s => s.id !== sessionId));
       if (currentChatSessionId === sessionId) {
         setCurrentChatSessionId(null);
@@ -525,6 +568,7 @@ const App: React.FC = () => {
       };
       setChatSessions(prev => [newSession, ...prev]);
       setCurrentChatSessionId(newSession.id);
+      sessionMessagesCacheRef.current.set(newSession.id, []);
       return newSession.id;
     } catch (err) {
       console.error('Failed to create chat session:', err);
@@ -955,6 +999,9 @@ const App: React.FC = () => {
           referenceImage: originalImage,
           colorVariantConfig: config,
         }, sessionId);
+        // 成功后重置 loading 状态
+        pendingColorVariantSessionRef.current = null;
+        setLoading(false);
       } else {
         throw new Error('未能生成套色图');
       }
@@ -1024,6 +1071,9 @@ const App: React.FC = () => {
           referenceImage: originalImage,
           colorVariantConfig: config,
         }, sessionId);
+        // 成功后重置 loading 状态
+        pendingColorVariantSessionRef.current = null;
+        setLoading(false);
       } else {
         throw new Error('未能生成套色图');
       }

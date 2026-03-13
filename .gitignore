@@ -1,34 +1,74 @@
 ﻿# Python
-**/__pycache__/
-*.pyc
-*.pyo
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Virtual environments
+# Virtual Environment
 venv/
 env/
-.venv/
+ENV/
+.venv
 
-# Node.js
-node_modules/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# Build outputs
-**/dist/
-**/.vite/
+# OS
+.DS_Store
+Thumbs.db
 
-# Env & logs
-.env
-.env.*
+# Logs
 *.log
+*.log.*
 
-# Local data (do not commit)
-picture-ai/data/*.db
-picture-ai/data/vector_store/
-picture-ai/data/generated/
-picture-ai/data/images/
+# Environment
+.env
+.env.local
 
-# Test outputs
-**/tests/qwen_output/
+# 临时部署脚本（不提交）
+diagnose_and_fix.py
+fix_*.py
+quick_*.py
+check_*.py
+deploy_*.py
+wait_and_check.py
+start_service.py
+realtime_log.py
+test_ssh.py
+update_config.py
+upload_and_deploy.bat
+一键部署.bat
 
-# Backups & reports at repo root
-_data_backup_*/
-Project_Report.md
+# Node
+node_modules/
+npm-debug.log
+
+# 数据
+picture-ai/data/generated/*
+!picture-ai/data/generated/.gitkeep
+picture-ai/data/images/*
+!picture-ai/data/images/.gitkeep
+picture-ai/data/vector_store/*
+!picture-ai/data/vector_store/.gitkeep
+picture-ai/data/logs/*
+!picture-ai/data/logs/.gitkeep
